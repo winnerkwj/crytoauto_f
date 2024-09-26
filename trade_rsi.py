@@ -27,7 +27,7 @@ trade_state = {
         "total_amount": 0,  # 총 매수량
         "total_cost": 0,  # 총 매수 금액 (가중 평균 계산용)
         "buy_executed_count": 0,  # 매수 실행 횟수
-        "sell_executed": False,
+        "sell_executed": False,  # 매도 완료 여부
         "sell_order_id": None  # 매도 주문 ID 저장 (체결 여부 확인용)
     } for ticker in tickers
 }
@@ -35,21 +35,21 @@ trade_state = {
 # 사용자 설정 변수들
 interval = "minute1"
 rsi_period = 14
-rsi_threshold = 30
+rsi_threshold = 30  # RSI 30 이하일 때 매수
 initial_buy_percent = 0.01
 
 profit_threshold = 0.3  # 수익률이 0.3% 이상일 때 매도
-loss_threshold_after_final_buy = -2  # 손실률이 -2% 이하일 때 매도
+loss_threshold_after_final_buy = -2.5  # 손실률이 -2% 이하일 때 매도
 
 # 단계별 추가 매수 조건 설정
 additional_buy_conditions = [
-    {"trigger_loss": -1, "buy_ratio": 0.01},    # 손실률 -1%에서 1% 매수
-    {"trigger_loss": -1.5, "buy_ratio": 0.015},  # 손실률 -1.5%에서 1.5% 매수
-    {"trigger_loss": -2, "buy_ratio": 0.02},     # 손실률 -2%에서 2% 매수
-    {"trigger_loss": -2.5, "buy_ratio": 0.025},  # 손실률 -2.5%에서 2.5% 매수
-    {"trigger_loss": -3, "buy_ratio": 0.03},     # 손실률 -3%에서 3% 매수
-    {"trigger_loss": -3.5, "buy_ratio": 0.035},  # 손실률 -3.5%에서 3.5% 매수
-    {"trigger_loss": -4, "buy_ratio": 0.04}      # 손실률 -4%에서 4% 매수
+    {"trigger_loss": -1, "buy_ratio": 0.01},    # 손실률 -1%에서 1% 추가 매수
+    {"trigger_loss": -1.2, "buy_ratio": 0.015},  # 손실률 -1.5%에서 1.5% 추가 매수
+    {"trigger_loss": -1.2, "buy_ratio": 0.02},     # 손실률 -2%에서 2% 추가 매수
+    {"trigger_loss": -1.3, "buy_ratio": 0.025},  # 손실률 -2.5%에서 2.5% 추가 매수
+    {"trigger_loss": -1.4, "buy_ratio": 0.03},     # 손실률 -3%에서 3% 추가 매수
+    {"trigger_loss": -1.5, "buy_ratio": 0.035},  # 손실률 -3.5%에서 3.5% 추가 매수
+    {"trigger_loss": -1.5, "buy_ratio": 0.04}      # 손실률 -4%에서 4% 추가 매수
 ]
 
 # 잔고 캐싱을 위한 전역 변수
@@ -123,6 +123,16 @@ def cancel_order(order_id):
     except Exception as e:
         print(f"주문 취소 오류 발생: {e}")
 
+# 매도 후 상태 초기화 함수
+def reset_trade_state(ticker):
+    trade_state[ticker]['buy1_price'] = None
+    trade_state[ticker]['total_amount'] = 0
+    trade_state[ticker]['total_cost'] = 0
+    trade_state[ticker]['buy_executed_count'] = 0
+    trade_state[ticker]['sell_executed'] = False
+    trade_state[ticker]['sell_order_id'] = None
+    print(f"{ticker}의 거래 상태가 초기화되었습니다.")
+
 # 미체결 주문 처리 함수 - 실시간 체결 확인 방식
 def handle_sell_order(ticker):
     sell_order_id = trade_state[ticker]['sell_order_id']
@@ -135,7 +145,7 @@ def handle_sell_order(ticker):
         order_status = upbit.get_order(sell_order_id)  # 주문 상태 확인
         if order_status['state'] == 'done':  # 주문이 완료된 경우
             print(f"{ticker} 매도 주문 체결 완료.")
-            trade_state[ticker]['sell_order_id'] = None  # 주문 ID 초기화
+            reset_trade_state(ticker)  # 매도 후 상태 초기화
             return
         else:
             print(f"{ticker} 매도 주문 미체결 상태, 15초 후 재확인...")
@@ -151,43 +161,6 @@ def handle_sell_order(ticker):
         if sell_order:
             trade_state[ticker]['sell_order_id'] = sell_order['uuid']  # 새로운 주문 ID 저장
             print(f"{ticker} 다시 매도 주문: 현재가 {current_price} KRW")
-
-# RSI 계산 함수
-def calculate_rsi(ticker, period=rsi_period, interval="minute1"):
-    df = pyupbit.get_ohlcv(ticker, interval=interval, count=period + 1)
-    if df is None or df.empty:
-        print(f"{ticker}의 OHLCV 데이터를 가져올 수 없습니다.")
-        return None
-
-    delta = df['close'].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-
-    avg_gain = np.mean(gain[-period:])
-    avg_loss = np.mean(loss[-period:])
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
-
-# RSI 매수 신호 감지 후 초기 매수 실행 함수
-def execute_buy_on_rsi_signal(ticker):
-    rsi = calculate_rsi(ticker, rsi_period)
-    if rsi is None:
-        return False
-
-    if rsi <= rsi_threshold:
-        print(f"{ticker}: RSI 매수 신호 감지 - RSI 값: {rsi:.2f}")
-        buy_amount = krw_balance * initial_buy_percent
-        execute_buy(ticker, buy_amount)
-        return True
-    else:
-        print(f"{ticker}: RSI 매수 신호 미충족 - RSI 값: {rsi:.2f}")
-        return False
 
 # 평균 매수 가격 계산 함수 (가중 평균)
 def calculate_avg_buy_price(ticker):
@@ -288,6 +261,60 @@ def trade_single_ticker(ticker):
 
     # 단계별 추가 매수 조건 체크 및 실행
     execute_additional_buy(ticker, current_price, profit_rate)
+
+# RSI 계산 함수
+def calculate_rsi(ticker, period=rsi_period, interval=interval):
+    df = pyupbit.get_ohlcv(ticker, interval=interval, count=period + 1)
+    if df is None or df.empty:
+        print(f"{ticker}의 {interval} 데이터를 가져올 수 없습니다.")
+        return None
+
+    delta = df['close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+
+    avg_gain = np.mean(gain[-period:])
+    avg_loss = np.mean(loss[-period:])
+
+    if avg_loss == 0:
+        return 100  # 손실이 없는 경우 RSI는 100
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi
+
+# RSI 매수 신호 감지 함수 (첫 매수에서만 사용)
+def detect_rsi_buy_signal(ticker, rsi_threshold=rsi_threshold, interval=interval):
+    rsi = calculate_rsi(ticker, interval=interval)
+    if rsi is None:
+        return False
+
+    if rsi <= rsi_threshold:
+        print(f"{ticker}: RSI 매수 신호 감지 - RSI 값: {rsi:.2f}")
+        return True
+    else:
+        print(f"{ticker}: RSI 매수 신호 미충족 - RSI 값: {rsi:.2f}")
+        return False
+
+# RSI 매수 신호 감지 후 초기 매수 실행 함수
+def execute_buy_on_rsi_signal(ticker):
+    # 첫 매수가 완료된 종목은 매수 로직을 생략
+    if trade_state[ticker]['buy_executed_count'] > 0:
+        print(f"{ticker} 이미 첫 매수가 완료된 종목입니다. 추가 매수 로직으로 이동합니다.")
+        return False  # 첫 매수 생략
+
+    if detect_rsi_buy_signal(ticker):
+        buy_amount = krw_balance * initial_buy_percent
+        print(f"{ticker} RSI 매수 신호 감지: {buy_amount} KRW 매수 진행")
+        buy_order = buy_crypto(ticker, buy_amount)
+        if buy_order is not None:
+            current_price = safe_get_current_price(ticker)
+            update_buy_state(ticker, current_price, buy_amount)  # 매수 후 상태 업데이트
+            print(f"{ticker} RSI 매수 완료: 가격: {current_price} KRW")
+        time.sleep(3)
+        return True  # 첫 매수 완료
+    return False
 
 # 업비트 로그인
 upbit = pyupbit.Upbit(access, secret)
