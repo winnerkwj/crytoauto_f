@@ -17,7 +17,7 @@ with open(key_file_path, 'r') as file:
 tickers = [
     "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-EOS", "KRW-ADA", 
     "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", 
-    "KRW-ARDR", "KRW-GAS", "KRW-HBAR", "KRW-STPT"
+    "KRW-ARDR", "KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI","KRW-ZRO","KRW-HIVE","KRW-SOL","KRW-HIFI","KRW-TFUEL","KRW-WAVES"
 ]
 
 # 종목별 거래 상태 관리 딕셔너리 초기화
