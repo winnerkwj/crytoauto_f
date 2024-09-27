@@ -1,7 +1,6 @@
 import time
 import numpy as np
 import pyupbit
-from datetime import datetime, timedelta
 
 # 최소 거래 금액 설정
 MIN_TRADE_AMOUNT = 500  # 최소 거래 금액 500 KRW
@@ -14,22 +13,26 @@ with open(key_file_path, 'r') as file:
     access = file.readline().strip()
     secret = file.readline().strip()
 
-# 거래할 암호화폐 종목 설정 (초기에는 비워둠)
-tickers = []
+# 거래할 암호화폐 종목 설정
+tickers = [
+    "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-EOS", "KRW-ADA", 
+    "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", 
+    "KRW-ARDR", "KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI",
+    "KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI", "KRW-TFUEL", 
+    "KRW-WAVES"
+]
 
-# 종목별 거래 상태 관리 딕셔너리 초기화 함수
-def initialize_trade_state():
-    global trade_state
-    trade_state = {
-        ticker: {
-            "buy1_price": None,  # 첫 매수 가격
-            "total_amount": 0,  # 총 매수량
-            "total_cost": 0,  # 총 매수 금액 (가중 평균 계산용)
-            "buy_executed_count": 0,  # 매수 실행 횟수
-            "sell_executed": False,  # 매도 완료 여부
-            "sell_order_id": None  # 매도 주문 ID 저장
-        } for ticker in tickers
-    }
+# 종목별 거래 상태 관리 딕셔너리 초기화
+trade_state = {
+    ticker: {
+        "buy1_price": None,  # 첫 매수 가격
+        "total_amount": 0,  # 총 매수량
+        "total_cost": 0,  # 총 매수 금액 (가중 평균 계산용)
+        "buy_executed_count": 0,  # 매수 실행 횟수
+        "sell_executed": False,  # 매도 완료 여부
+        "sell_order_id": None  # 매도 주문 ID 저장
+    } for ticker in tickers
+}
 
 # 사용자 설정 변수들
 interval = "minute1"
@@ -81,14 +84,21 @@ def get_cached_balance(currency, retry_count=3):
     print(f"잔고 조회 실패, {retry_count}번 시도 후 중단")
     return 0
 
-# 시가총액 상위 40개 암호화폐 종목 조회 및 등록 함수 (1일 1회 업데이트)
-def update_top_40_tickers():
-    global tickers
-    try:
-        tickers = pyupbit.get_tickers(fiat="KRW")[:40]  # 상위 40개 티커 선택
-        print(f"시가총액 상위 40개 티커 업데이트 완료: {tickers}")
-    except Exception as e:
-        print(f"티커 업데이트 오류: {e}")
+# 기존 암호화폐 잔고를 반영하여 trade_state 초기화
+def initialize_trade_state():
+    for ticker in tickers:
+        crypto_balance = get_cached_balance(ticker.split("-")[1])
+        
+        if crypto_balance > 0:
+            current_price = safe_get_current_price(ticker)
+            if current_price is None:
+                continue  # 가격을 가져오지 못하면 다음 티커로 넘어감
+            
+            trade_state[ticker]['buy1_price'] = current_price
+            trade_state[ticker]['total_amount'] = crypto_balance
+            trade_state[ticker]['total_cost'] = crypto_balance * current_price
+            trade_state[ticker]['buy_executed_count'] = 1  # 매수가 한 번 이루어진 상태로 가정
+            print(f"{ticker} 초기 잔고 {crypto_balance} 반영 완료. 현재 가격: {current_price}")
 
 # 현재 가격 조회 함수
 def safe_get_current_price(ticker, retry_count=3):
@@ -297,22 +307,17 @@ def should_sell(ticker, current_price):
 upbit = pyupbit.Upbit(access, secret)
 print("자동 거래 시작")
 
-# Step 1: 시가총액 상위 40개 티커 업데이트
-update_top_40_tickers()
+# Step 1: 초기 구매 결정
+krw_balance = get_cached_balance("KRW")
+print(f"현재 KRW 잔고: {krw_balance}")
+
+# Step 2: 기존 잔고를 반영한 trade_state 초기화
 initialize_trade_state()
 
-# Step 2: 각 티커에 대해 1분마다 거래 실행
-last_ticker_update = datetime.now()
-
+# Step 3: 각 티커에 대해 1분마다 거래 실행
 while True:
     start_time = time.time()
     
-    # 매일 한 번 상위 40개 티커 업데이트
-    if datetime.now() - last_ticker_update > timedelta(days=1):
-        update_top_40_tickers()
-        initialize_trade_state()  # 티커 변경에 따라 상태 초기화
-        last_ticker_update = datetime.now()
-
     for ticker in tickers:
         print(f"{ticker}의 매수 상태 확인 중...")
         trade_single_ticker(ticker)  # 매도 및 추가 매수는 손실률 기준으로 실행
