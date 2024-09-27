@@ -59,7 +59,7 @@ balance_cache = {}
 cache_timestamp = 0
 cache_duration = 60  # 60초 동안 캐시 유지
 
-# 잔고 조회 함수 (캐싱 적용 및 재시도 로직 추가)
+# 잔고 조회 함수 (KRW는 실시간으로, 다른 암호화폐는 캐싱 적용)
 def get_cached_balance(currency, retry_count=3):
     global balance_cache, cache_timestamp
     current_time = time.time()
@@ -67,11 +67,12 @@ def get_cached_balance(currency, retry_count=3):
 
     while attempt < retry_count:
         try:
-            if current_time - cache_timestamp > cache_duration:
-                print("잔고 캐시 만료, 새로 조회 중...")
+            if currency == "KRW" or current_time - cache_timestamp > cache_duration:
+                print("KRW 잔고를 실시간으로 조회 중..." if currency == "KRW" else "잔고 캐시 만료, 새로 조회 중...")
                 balance_cache = upbit.get_balances()
                 cache_timestamp = current_time
                 print("잔고 갱신 성공")
+                
             for b in balance_cache:
                 if b['currency'] == currency and b['balance'] is not None:
                     return float(b['balance'])
@@ -82,6 +83,22 @@ def get_cached_balance(currency, retry_count=3):
             time.sleep(1)
     print(f"잔고 조회 실패, {retry_count}번 시도 후 중단")
     return 0
+
+# 기존 암호화폐 잔고를 반영하여 trade_state 초기화
+def initialize_trade_state():
+    for ticker in tickers:
+        crypto_balance = get_cached_balance(ticker.split("-")[1])
+        
+        if crypto_balance > 0:
+            current_price = safe_get_current_price(ticker)
+            if current_price is None:
+                continue  # 가격을 가져오지 못하면 다음 티커로 넘어감
+            
+            trade_state[ticker]['buy1_price'] = current_price
+            trade_state[ticker]['total_amount'] = crypto_balance
+            trade_state[ticker]['total_cost'] = crypto_balance * current_price
+            trade_state[ticker]['buy_executed_count'] = 1  # 매수가 한 번 이루어진 상태로 가정
+            print(f"{ticker} 초기 잔고 {crypto_balance} 반영 완료. 현재 가격: {current_price}")
 
 # 현재 가격 조회 함수
 def safe_get_current_price(ticker, retry_count=3):
@@ -98,11 +115,17 @@ def safe_get_current_price(ticker, retry_count=3):
             time.sleep(1)
     return None
 
-# 매수 로직 (최소 거래 금액을 확인)
+# 매수 로직 (최소 거래 금액을 확인 및 잔고 부족 처리)
 def buy_crypto(ticker, amount):
     if amount < MIN_TRADE_AMOUNT:
         print(f"{ticker} 매수 금액 {amount} KRW는 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 이하입니다.")
         return None
+    
+    krw_balance = get_cached_balance("KRW")  # 최신 KRW 잔고 확인
+    if krw_balance < amount:
+        print(f"KRW 잔고 부족: 요청된 매수 금액 {amount} KRW, 실제 잔고 {krw_balance} KRW")
+        return None
+    
     time.sleep(1/8)
     try:
         return upbit.buy_market_order(ticker, amount)
@@ -122,6 +145,85 @@ def sell_crypto(ticker, price, amount):
     except Exception as e:
         print(f"{ticker} 매도 오류 발생: {e}")
         return None
+
+# 매도 후 상태 초기화 함수
+def reset_trade_state(ticker):
+    trade_state[ticker]['buy1_price'] = None
+    trade_state[ticker]['total_amount'] = 0
+    trade_state[ticker]['total_cost'] = 0
+    trade_state[ticker]['buy_executed_count'] = 0
+    trade_state[ticker]['sell_executed'] = False
+    trade_state[ticker]['sell_order_id'] = None
+    print(f"{ticker}의 거래 상태가 초기화되었습니다.")
+
+# 매수 실행 로직 (외부 매도 감지 추가)
+def execute_buy(ticker, buy_amount):
+    current_price = safe_get_current_price(ticker)
+    if current_price is None:
+        return False
+
+    # 외부에서 매도되어 실제 잔고가 없는 경우 감지 및 초기화
+    crypto_balance = get_cached_balance(ticker.split("-")[1])
+    if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
+        print(f"{ticker}: 외부에서 매도된 것으로 확인. 상태 초기화.")
+        reset_trade_state(ticker)
+        return False
+
+    buy_order = buy_crypto(ticker, buy_amount)
+    if buy_order:
+        trade_state[ticker]['total_cost'] += buy_amount
+        trade_state[ticker]['total_amount'] += buy_amount / current_price
+        trade_state[ticker]['buy_executed_count'] += 1
+        print(f"{ticker} 매수 완료: {buy_amount} KRW 매수, 가격: {current_price} KRW")
+        return True
+    return False
+
+# 추가 매수 실행 로직 (외부 매도 감지 추가)
+def execute_additional_buy(ticker, current_price, profit_rate):
+    buy_executed_count = trade_state[ticker]['buy_executed_count']
+    
+    if buy_executed_count == 0:
+        return  # 초기 매수가 되지 않았다면 추가 매수하지 않음
+
+    # 외부에서 매도되어 실제 잔고가 없는 경우 감지 및 초기화
+    crypto_balance = get_cached_balance(ticker.split("-")[1])
+    if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
+        print(f"{ticker}: 외부에서 매도된 것으로 확인. 상태 초기화.")
+        reset_trade_state(ticker)
+        return
+
+    for i, condition in enumerate(additional_buy_conditions):
+        if profit_rate <= condition['trigger_loss'] and buy_executed_count == i + 1:
+            buy_amount = krw_balance * condition['buy_ratio']
+            print(f"{ticker}: 손실률 {profit_rate:.2f}%, 추가 매수 {i + 2}차 진행 - {buy_amount} KRW")
+            execute_buy(ticker, buy_amount)
+            break
+
+# 단일 티커에 대한 매수/매도 로직 실행 함수 (외부 매도 감지 추가)
+def trade_single_ticker(ticker):
+    current_price = safe_get_current_price(ticker)
+    if current_price is None:
+        return
+
+    # 실제 잔고 확인
+    crypto_balance = get_cached_balance(ticker.split("-")[1])
+
+    # 내부 상태와 실제 잔고 불일치 감지
+    if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
+        print(f"{ticker}의 실제 잔고가 0입니다. 외부에서 매도가 이루어진 것으로 추정됩니다. 상태 초기화.")
+        reset_trade_state(ticker)
+        return
+
+    if trade_state[ticker]['buy_executed_count'] == 0:
+        execute_buy_on_rsi_signal(ticker)
+    else:
+        should_sell_now, reason = should_sell(ticker, current_price)
+        if should_sell_now:
+            if crypto_balance > 0:
+                sell_order = sell_crypto(ticker, current_price, crypto_balance)
+                if sell_order:
+                    reset_trade_state(ticker)
+                    print(f"{ticker} 매도 완료: 가격 {current_price} KRW")
 
 # RSI 계산 함수
 def calculate_rsi(ticker, period=rsi_period, interval=interval):
@@ -185,7 +287,7 @@ def execute_buy_on_rsi_signal(ticker):
         return True
     return False
 
-# 매도 조건 확인
+# 매도 조건 확인 함수
 def should_sell(ticker, current_price):
     avg_buy_price = trade_state[ticker]['buy1_price']
     if avg_buy_price is None:
@@ -201,31 +303,6 @@ def should_sell(ticker, current_price):
     
     return False, None
 
-# 단일 티커에 대한 매수/매도 로직 실행 함수
-def trade_single_ticker(ticker):
-    current_price = safe_get_current_price(ticker)
-    if current_price is None:
-        return
-
-    if trade_state[ticker]['buy_executed_count'] == 0:
-        execute_buy_on_rsi_signal(ticker)
-    else:
-        should_sell_now, reason = should_sell(ticker, current_price)
-        if should_sell_now:
-            crypto_balance = get_cached_balance(ticker.split("-")[1])
-            if crypto_balance > 0:
-                sell_order = sell_crypto(ticker, current_price, crypto_balance)
-                if sell_order:
-                    trade_state[ticker] = {
-                        "buy1_price": None,
-                        "total_amount": 0,
-                        "total_cost": 0,
-                        "buy_executed_count": 0,
-                        "sell_executed": True,
-                        "sell_order_id": sell_order['uuid']
-                    }
-                    print(f"{ticker} 매도 완료: 가격 {current_price} KRW")
-
 # 업비트 로그인
 upbit = pyupbit.Upbit(access, secret)
 print("자동 거래 시작")
@@ -234,7 +311,10 @@ print("자동 거래 시작")
 krw_balance = get_cached_balance("KRW")
 print(f"현재 KRW 잔고: {krw_balance}")
 
-# Step 2: 각 티커에 대해 1분마다 거래 실행
+# Step 2: 기존 잔고를 반영한 trade_state 초기화
+initialize_trade_state()
+
+# Step 3: 각 티커에 대해 1분마다 거래 실행
 while True:
     start_time = time.time()
     
