@@ -146,53 +146,53 @@ def reset_trade_state(ticker):
     trade_state[ticker]['sell_order_id'] = None
     print(f"{ticker}의 거래 상태가 초기화되었습니다.")
 
-# 매수 실행 로직 (외부 매도 감지 추가)
-def execute_buy(ticker, buy_amount):
-    current_price = safe_get_current_price(ticker)
-    if current_price is None:
-        return False
-
-    # 외부에서 매도되어 실제 잔고가 없는 경우 감지 및 초기화
-    crypto_balance = get_cached_balance(ticker.split("-")[1])
-    if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
-        print(f"{ticker}: 외부에서 매도된 것으로 확인. 상태 초기화.")
-        reset_trade_state(ticker)
-        return False
-
-    buy_order = buy_crypto(ticker, buy_amount)
-    if buy_order:
-        trade_state[ticker]['total_cost'] += buy_amount
-        trade_state[ticker]['total_amount'] += buy_amount / current_price
-        trade_state[ticker]['buy_executed_count'] += 1
-        print(f"{ticker} 매수 완료: {buy_amount} KRW 매수, 가격: {current_price} KRW")
-        return True
-    return False
-
-# 추가 매수 실행 로직 (외부 매도 감지 추가)
+# 추가 매수 로직 수정 (매수 조건 충족 시 반복적으로 매수 시도)
 def execute_additional_buy(ticker, current_price, profit_rate):
-    buy_executed_count = trade_state[ticker]['buy_executed_count']
+    print(f"추가 매수 확인: {ticker} 현재 손익률: {profit_rate:.2f}%, 평균 매수 가격: {trade_state[ticker]['buy1_price']}, 현재 가격: {current_price}")
     
-    if buy_executed_count == 0:
-        return  # 초기 매수가 되지 않았다면 추가 매수하지 않음
-
-    # 외부에서 매도되어 실제 잔고가 없는 경우 감지 및 초기화
-    crypto_balance = get_cached_balance(ticker.split("-")[1])
-    if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
-        print(f"{ticker}: 외부에서 매도된 것으로 확인. 상태 초기화.")
-        reset_trade_state(ticker)
-        return
-
-    for i, condition in enumerate(additional_buy_conditions):
-        if profit_rate <= condition['trigger_loss'] and buy_executed_count == i + 1:
-            buy_amount = krw_balance * condition['buy_ratio']
-            print(f"{ticker}: 손실률 {profit_rate:.2f}%, 추가 매수 {i + 2}차 진행 - {buy_amount} KRW")
+    for condition in additional_buy_conditions:
+        # 손실률 조건을 충족할 때 반복적으로 추가 매수 시도
+        if profit_rate <= condition['trigger_loss']:
+            buy_amount = get_cached_balance("KRW") * condition['buy_ratio']
+            if buy_amount < MIN_TRADE_AMOUNT:
+                print(f"{ticker} 추가 매수 불가: 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 이하")
+                return
+            print(f"{ticker}: 손실률 {profit_rate:.2f}%, 추가 매수 진행 - {buy_amount} KRW")
             execute_buy(ticker, buy_amount)
             break
 
-# 단일 티커에 대한 매수/매도 로직 실행 함수 (외부 매도 감지 추가)
+# 초기 매수 실행 함수 (RSI 신호 확인 및 매수 시도)
+def execute_buy_on_rsi_signal(ticker):
+    if trade_state[ticker]['buy_executed_count'] > 0:
+        print(f"{ticker}: 이미 첫 매수가 완료된 종목입니다.")
+        return False
+
+    if detect_rsi_buy_signal(ticker):
+        krw_balance = get_cached_balance("KRW")
+        buy_amount = krw_balance * initial_buy_percent
+        if buy_amount < MIN_TRADE_AMOUNT:
+            print(f"{ticker}: 잔고 부족으로 매수 불가 - 매수 금액 {buy_amount} KRW, 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW")
+            return False
+        
+        print(f"{ticker}: RSI 매수 신호 감지 - 매수 금액 {buy_amount} KRW")
+        buy_order = buy_crypto(ticker, buy_amount)
+        if buy_order is not None:
+            current_price = safe_get_current_price(ticker)
+            if current_price:
+                trade_state[ticker]['buy1_price'] = current_price
+                trade_state[ticker]['buy_executed_count'] += 1
+                print(f"{ticker}: 매수 완료 - 가격 {current_price} KRW, 매수 횟수: {trade_state[ticker]['buy_executed_count']}")
+        time.sleep(3)
+        return True
+    else:
+        print(f"{ticker}: RSI 조건을 충족하지 못해 매수 시도 안 함")
+    return False
+
+# 단일 티커에 대한 매수/매도 로직 실행 함수
 def trade_single_ticker(ticker):
     current_price = safe_get_current_price(ticker)
     if current_price is None:
+        print(f"{ticker}: 현재 가격을 가져올 수 없어 매매 중단")
         return
 
     # 실제 잔고 확인
@@ -200,20 +200,33 @@ def trade_single_ticker(ticker):
 
     # 내부 상태와 실제 잔고 불일치 감지
     if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
-        print(f"{ticker}의 실제 잔고가 0입니다. 외부에서 매도가 이루어진 것으로 추정됩니다. 상태 초기화.")
+        print(f"{ticker}: 실제 잔고가 0입니다. 외부에서 매도된 것으로 추정됩니다. 상태 초기화")
         reset_trade_state(ticker)
         return
 
-    if trade_state[ticker]['buy_executed_count'] == 0:
+    avg_buy_price = trade_state[ticker]['buy1_price']
+    if avg_buy_price is None:
+        # 매수 신호 감지 후 첫 매수 시도
+        print(f"{ticker}: 첫 매수 시도 중")
         execute_buy_on_rsi_signal(ticker)
-    else:
-        should_sell_now, reason = should_sell(ticker, current_price)
-        if should_sell_now:
-            if crypto_balance > 0:
-                sell_order = sell_crypto(ticker, current_price, crypto_balance)
-                if sell_order:
-                    reset_trade_state(ticker)
-                    print(f"{ticker} 매도 완료: 가격 {current_price} KRW")
+        return
+
+    # 손익률 계산
+    profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
+    print(f"{ticker}: 손익률 계산 중 - 현재 가격: {current_price} KRW, 손익률: {profit_rate:.2f}%")
+
+    # 추가 매수 로직
+    execute_additional_buy(ticker, current_price, profit_rate)
+
+    # 매도 조건 확인
+    should_sell_now, reason = should_sell(ticker, current_price)
+    if should_sell_now:
+        print(f"{ticker}: 매도 조건 충족 - {reason}")
+        if crypto_balance > 0:
+            sell_order = sell_crypto(ticker, current_price, crypto_balance)
+            if sell_order:
+                reset_trade_state(ticker)
+                print(f"{ticker}: 매도 완료 - 가격 {current_price} KRW")
 
 # RSI 계산 함수
 def calculate_rsi(ticker, period=rsi_period, interval=interval):
@@ -251,31 +264,6 @@ def detect_rsi_buy_signal(ticker, rsi_threshold=rsi_threshold, interval=interval
     else:
         print(f"{ticker}: RSI 매수 신호 미충족 - RSI 값: {rsi:.2f}")
         return False
-
-# 초기 매수 실행 함수
-def execute_buy_on_rsi_signal(ticker):
-    if trade_state[ticker]['buy_executed_count'] > 0:
-        print(f"{ticker} 이미 첫 매수가 완료된 종목입니다.")
-        return False
-
-    if detect_rsi_buy_signal(ticker):
-        krw_balance = get_cached_balance("KRW")
-        buy_amount = krw_balance * initial_buy_percent
-        if buy_amount < MIN_TRADE_AMOUNT:
-            print(f"잔고 부족으로 {ticker} 매수 불가: 매수 금액 {buy_amount} KRW")
-            return False
-        
-        print(f"{ticker} RSI 매수 신호 감지: {buy_amount} KRW 매수 진행")
-        buy_order = buy_crypto(ticker, buy_amount)
-        if buy_order is not None:
-            current_price = safe_get_current_price(ticker)
-            if current_price:
-                trade_state[ticker]['buy1_price'] = current_price
-                trade_state[ticker]['buy_executed_count'] += 1
-                print(f"{ticker} 매수 완료: 가격 {current_price} KRW")
-        time.sleep(3)
-        return True
-    return False
 
 # 매도 조건 확인 함수
 def should_sell(ticker, current_price):
