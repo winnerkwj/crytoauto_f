@@ -40,10 +40,10 @@ def initialize_trade_state():
 # 사용자 설정 변수들
 interval = "minute1"
 rsi_period = 14
-rsi_threshold = 30  # RSI 30 이하일 때 매수
+rsi_threshold = 26  # RSI 30 이하일 때 매수
 initial_buy_percent = 0.01
 
-profit_threshold = 0.3  # 수익률이 0.3% 이상일 때 매도
+profit_threshold = 0.45  # 수익률이 0.45% 이상일 때 매도
 loss_threshold_after_final_buy = -2.5  # 손실률이 -2.5% 이하일 때 매도
 
 # 단계별 추가 매수 조건 설정
@@ -62,24 +62,42 @@ balance_cache = {}
 cache_timestamp = 0
 cache_duration = 60  # 60초 동안 캐시 유지
 
+# KRW 잔고 이전 값 (입출금 감지용)
+krw_last_balance = 0
+
 # 잔고 조회 함수 (KRW는 실시간으로, 다른 암호화폐는 캐싱 적용)
 def get_cached_balance(currency, retry_count=3):
-    global balance_cache, cache_timestamp
+    global balance_cache, cache_timestamp, krw_last_balance
     current_time = time.time()
     attempt = 0
 
     while attempt < retry_count:
         try:
-            if currency == "KRW" or current_time - cache_timestamp > cache_duration:
-                print("KRW 잔고를 실시간으로 조회 중..." if currency == "KRW" else "잔고 캐시 만료, 새로 조회 중...")
-                balance_cache = upbit.get_balances()
-                cache_timestamp = current_time
-                print("잔고 갱신 성공")
-                
-            for b in balance_cache:
-                if b['currency'] == currency and b['balance'] is not None:
-                    return float(b['balance'])
-            return 0
+            if currency == "KRW":
+                # KRW 잔고는 항상 실시간으로 조회
+                print("KRW 잔고를 실시간으로 조회 중...")
+                balances = upbit.get_balances()
+                for b in balances:
+                    if b['currency'] == "KRW" and b['balance'] is not None:
+                        current_krw_balance = float(b['balance'])
+                        # 입출금 여부 감지
+                        if current_krw_balance != krw_last_balance:
+                            print(f"KRW 잔고 변동 감지: 이전 잔고 {krw_last_balance} KRW, 현재 잔고 {current_krw_balance} KRW")
+                            krw_last_balance = current_krw_balance  # 새로운 잔고로 업데이트
+                        return current_krw_balance
+                return 0
+            else:
+                # 다른 암호화폐는 캐싱 사용 (캐시 시간 만료 시 재조회)
+                if current_time - cache_timestamp > cache_duration:
+                    print("잔고 캐시 만료, 새로 조회 중...")
+                    balance_cache = upbit.get_balances()
+                    cache_timestamp = current_time
+                    print("잔고 갱신 성공")
+                    
+                for b in balance_cache:
+                    if b['currency'] == currency and b['balance'] is not None:
+                        return float(b['balance'])
+                return 0
         except Exception as e:
             attempt += 1
             print(f"잔고 조회 실패 (시도 {attempt}/{retry_count}): {e}")
@@ -88,7 +106,7 @@ def get_cached_balance(currency, retry_count=3):
     return 0
 
 # 잔고 기준으로 추가할 사용자 지정 티커를 찾는 함수
-def update_user_defined_tickers():
+def update_user_defined_tickers_with_balance():
     global user_defined_tickers
     user_defined_tickers = []  # 매번 초기화
 
@@ -105,9 +123,29 @@ def update_user_defined_tickers():
                     ticker = f"KRW-{currency}"
                     user_defined_tickers.append(ticker)
 
+                    # 잔고만큼 초기 매수로 인식
+                    initialize_buy_state_from_balance(ticker, float(balance['balance']), float(balance['avg_buy_price']))
+
         print(f"5000원 이상 잔고 보유 종목: {user_defined_tickers}")
     except Exception as e:
         print(f"잔고 조회 오류: {e}")
+
+# 기존 보유 종목을 초기 매수로 인식하는 함수
+def initialize_buy_state_from_balance(ticker, balance_amount, avg_buy_price):
+    """
+    기존 보유 암호화폐의 잔고와 평균 매수 가격을 초기 매수로 인식하는 함수.
+    """
+    if ticker not in trade_state:
+        print(f"{ticker}의 거래 상태가 초기화되지 않았습니다. 상태를 먼저 초기화하세요.")
+        return
+
+    # 기존 잔고를 초기 매수로 인식
+    trade_state[ticker]['buy1_price'] = avg_buy_price
+    trade_state[ticker]['total_amount'] = balance_amount
+    trade_state[ticker]['total_cost'] = balance_amount * avg_buy_price
+    trade_state[ticker]['buy_executed_count'] = 1  # 최소 1번의 매수가 완료된 것으로 간주
+
+    print(f"{ticker}: 초기 매수 상태 설정 완료 - 평균 매수 가격: {avg_buy_price:.2f} KRW, 잔고: {balance_amount} 개")
 
 # 시가총액 상위 40개 암호화폐 종목 조회 및 등록 함수 (1일 1회 업데이트)
 def update_top_40_tickers():
@@ -117,7 +155,7 @@ def update_top_40_tickers():
         top_40_tickers = pyupbit.get_tickers(fiat="KRW")[:40]
 
         # 사용자 지정 티커를 잔고 기준으로 업데이트
-        update_user_defined_tickers()
+        update_user_defined_tickers_with_balance()
 
         # 사용자 지정 종목을 중복 없이 추가
         tickers = list(set(top_40_tickers + user_defined_tickers))
@@ -385,4 +423,3 @@ while True:
     elapsed_time = time.time() - start_time
     if elapsed_time < 60:
         time.sleep(60 - elapsed_time)
-##
