@@ -48,13 +48,13 @@ loss_threshold_after_final_buy = -2.5  # 손실률이 -2.5% 이하일 때 매도
 
 # 단계별 추가 매수 조건 설정
 additional_buy_conditions = [
-    {"trigger_loss": -1, "buy_ratio": 0.01},    # 손실률 -1%에서 1% 추가 매수
-    {"trigger_loss": -1.2, "buy_ratio": 0.015},  # 손실률 -1.2%에서 1.5% 추가 매수
-    {"trigger_loss": -1.3, "buy_ratio": 0.02},   # 손실률 -1.3%에서 2% 추가 매수
-    {"trigger_loss": -1.4, "buy_ratio": 0.025},  # 손실률 -1.4%에서 2.5% 추가 매수
-    {"trigger_loss": -1.5, "buy_ratio": 0.03},   # 손실률 -1.5%에서 3% 추가 매수
-    {"trigger_loss": -1.7, "buy_ratio": 0.035},  # 손실률 -1.7%에서 3.5% 추가 매수
-    {"trigger_loss": -2, "buy_ratio": 0.04}      # 손실률 -2%에서 4% 추가 매수
+    {"trigger_loss": -1},    # 손실률 -1%에서 추가 매수
+    {"trigger_loss": -1.2},  # 손실률 -1.2%에서 추가 매수
+    {"trigger_loss": -1.3},   # 손실률 -1.3%에서 추가 매수
+    {"trigger_loss": -1.4},  # 손실률 -1.4%에서 추가 매수
+    {"trigger_loss": -1.5},   # 손실률 -1.5%에서 추가 매수
+    {"trigger_loss": -1.7},  # 손실률 -1.7%에서 추가 매수
+    {"trigger_loss": -2}      # 손실률 -2%에서 추가 매수
 ]
 
 # 잔고 캐싱을 위한 전역 변수
@@ -159,17 +159,17 @@ def buy_crypto(ticker, amount):
         print(f"{ticker} 매수 오류 발생: {e}")
         return None
 
-# 매도 로직
-def sell_crypto(ticker, price, amount):
-    total_amount = price * amount
+# 매도 로직 - 시장가 매도
+def sell_crypto(ticker, amount):
+    total_amount = amount * pyupbit.get_current_price(ticker)
     if total_amount < MIN_TRADE_AMOUNT:
         print(f"{ticker} 매도 금액 {total_amount} KRW는 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 이하입니다.")
         return None
     time.sleep(1/8)
     try:
-        return upbit.sell_limit_order(ticker, price, amount)
+        return upbit.sell_market_order(ticker, amount)  # 시장가 매도
     except Exception as e:
-        print(f"{ticker} 매도 오류 발생: {e}")
+        print(f"{ticker} 시장가 매도 오류 발생: {e}")
         return None
 
 # 매도 후 상태 초기화 함수
@@ -202,18 +202,21 @@ def update_weighted_avg_price(ticker, new_buy_price, new_buy_amount):
 
     print(f"{ticker}: 가중 평균 매수가 업데이트 - 새로운 평균 매수가: {new_avg_buy_price:.2f} KRW, 총 매수량: {total_new_amount} 개")
 
-# 추가 매수 로직 (손실률에 따른 추가 매수)
+# 추가 매수 로직 (손실률에 따른 추가 매수 - 잔고의 2배 매수)
 def execute_additional_buy(ticker, current_price, profit_rate):
     print(f"{ticker}: 추가 매수 확인 중 - 현재 손익률: {profit_rate:.2f}%")
 
     # 추가 매수 조건 확인
     for condition in additional_buy_conditions:
         if profit_rate <= condition['trigger_loss']:
-            buy_amount = get_cached_balance("KRW") * condition['buy_ratio']
+            # 현재 암호화폐 잔고의 2배를 추가 매수
+            crypto_balance = get_cached_balance(ticker.split("-")[1])
+            buy_amount = crypto_balance * current_price * 2  # 잔고 2배에 해당하는 KRW 금액 계산
+            
             if buy_amount < MIN_TRADE_AMOUNT:
                 print(f"{ticker}: 추가 매수 금액이 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 미만이므로 매수 중단.")
                 return False
-            print(f"{ticker}: 추가 매수 진행 중 - 매수 금액: {buy_amount} KRW")
+            print(f"{ticker}: 추가 매수 진행 중 - 매수 금액: {buy_amount:.2f} KRW")
 
             # 매수 실행
             buy_order = buy_crypto(ticker, buy_amount)
@@ -259,7 +262,7 @@ def trade_single_ticker(ticker):
     if should_sell_now:
         print(f"{ticker}: 매도 조건 충족 - 이유: {reason}")
         if crypto_balance > 0:
-            sell_order = sell_crypto(ticker, current_price, crypto_balance)
+            sell_order = sell_crypto(ticker, crypto_balance)  # 시장가 매도
             if sell_order:
                 reset_trade_state(ticker)
                 print(f"{ticker}: 매도 완료 - 가격 {current_price} KRW")
