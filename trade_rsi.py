@@ -15,11 +15,8 @@ with open(key_file_path, 'r') as file:
 
 # 거래할 암호화폐 종목 설정
 tickers = [
-    "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-EOS", "KRW-ADA", 
-    "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", 
-    "KRW-ARDR", "KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI",
-    "KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI", "KRW-TFUEL", 
-    "KRW-WAVES"
+    "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA","KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO","KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI","KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI", "KRW-WAVES", "KRW-CKB", "KRW-ETC","KRW-TRX","KRW-MED",
+"KRW-GLM","KRW-BEAM","KRW-UPP","KRW-SUI","KRW-STX","KRW-GAS","KRW-BLUR","KRW-NEAR",
 ]
 
 # 종목별 거래 상태 관리 딕셔너리 초기화
