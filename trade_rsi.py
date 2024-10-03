@@ -58,6 +58,9 @@ balance_cache = {}
 cache_timestamp = 0
 cache_duration = 60  # 60초 동안 캐시 유지
 
+# 최대 주문 수량 설정 (슬리피지 최소화를 위한 주문 분할)
+MAX_ORDER_SIZE = 0.1  # 각 주문에서 매도할 최대 코인 수량 (예시값, 종목에 따라 조정 필요)
+
 # 잔고 조회 함수 (KRW는 실시간으로, 다른 암호화폐는 캐싱 적용)
 def get_cached_balance(currency, retry_count=3):
     global balance_cache, cache_timestamp
@@ -132,17 +135,76 @@ def buy_crypto(ticker, amount):
         print(f"{ticker} 매수 오류 발생: {e}")
         return None
 
-# 매도 로직
-def sell_crypto(ticker, price, amount):
-    total_amount = price * amount
-    if total_amount < MIN_TRADE_AMOUNT:
-        print(f"{ticker} 매도 금액 {total_amount} KRW는 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 이하입니다.")
+# 매도 로직 (슬리피지 최소화를 위한 전략 적용)
+def sell_crypto(ticker, amount):
+    # 주문 분할을 위한 변수 설정
+    amount_to_sell = amount
+    max_order_size = MAX_ORDER_SIZE  # 최대 주문 수량
+    total_sold = 0  # 총 매도된 수량
+
+    while amount_to_sell > 0:
+        order_size = min(amount_to_sell, max_order_size)
+        sell_price = get_optimal_sell_price(ticker, order_size)
+        if sell_price is None:
+            print(f"{ticker} 매도 실패: 최적의 매도 가격을 찾을 수 없습니다.")
+            return None
+
+        total_order_value = sell_price * order_size
+        if total_order_value < MIN_TRADE_AMOUNT:
+            print(f"{ticker} 매도 금액 {total_order_value:.2f} KRW는 최소 거래 금액 {MIN_TRADE_AMOUNT} KRW 이하입니다.")
+            break  # 남은 금액이 최소 거래 금액 이하이면 루프 종료
+
+        time.sleep(1/8)
+        try:
+            # IOC 옵션을 사용하여 지정가 매도 주문 제출
+            order = upbit.sell_limit_order(ticker, sell_price, order_size)
+            if order is not None:
+                print(f"{ticker} 매도 주문 제출: 가격 {sell_price} KRW, 수량 {order_size}")
+                # 주문 체결 확인
+                time.sleep(0.5)  # 주문 체결 대기
+                order_result = upbit.get_order(order['uuid'])
+                if order_result['state'] == 'done':
+                    print(f"{ticker} 매도 주문 체결 완료: 체결 수량 {order_size}")
+                    total_sold += order_size
+                    amount_to_sell -= order_size
+                else:
+                    # 미체결 수량 취소
+                    upbit.cancel_order(order['uuid'])
+                    print(f"{ticker} 매도 주문 미체결로 취소됨")
+                    break
+            else:
+                print(f"{ticker} 매도 주문 실패")
+                break
+        except Exception as e:
+            print(f"{ticker} 매도 오류 발생: {e}")
+            break
+
+        time.sleep(0.5)  # 주문 사이에 약간의 지연 시간 추가
+
+    if total_sold > 0:
+        return True
+    else:
         return None
-    time.sleep(1/8)
+
+# 최적의 매도 가격 계산 함수
+def get_optimal_sell_price(ticker, amount):
     try:
-        return upbit.sell_limit_order(ticker, price, amount)
+        orderbook = pyupbit.get_orderbook(ticker)
+        if orderbook is None or 'orderbook_units' not in orderbook[0]:
+            print(f"{ticker}의 호가 정보를 가져올 수 없습니다.")
+            return None
+
+        bids = orderbook[0]['orderbook_units']  # 매수 호가 목록
+        total_bid_volume = 0
+        for bid in bids:
+            total_bid_volume += bid['bid_size']
+            if total_bid_volume >= amount:
+                optimal_price = bid['bid_price']
+                return optimal_price
+        # 전체 매수 호가를 합쳐도 원하는 수량에 미치지 못하면 최저 매수 호가로 설정
+        return bids[-1]['bid_price']
     except Exception as e:
-        print(f"{ticker} 매도 오류 발생: {e}")
+        print(f"{ticker} 호가 정보 조회 중 오류 발생: {e}")
         return None
 
 # 매도 후 상태 초기화 함수
@@ -223,13 +285,13 @@ def trade_single_ticker(ticker):
         should_sell_now, reason = should_sell(ticker, current_price)
         if should_sell_now:
             if crypto_balance > 0:
-                sell_order = sell_crypto(ticker, current_price, crypto_balance)
+                sell_order = sell_crypto(ticker, crypto_balance)
                 if sell_order:
                     reset_trade_state(ticker)
-                    print(f"{ticker} 매도 완료: 가격 {current_price} KRW")
+                    print(f"{ticker} 매도 완료: 수량 {crypto_balance}")
         else:
             # 추가 매수 조건 체크 및 실행
-            avg_buy_price = trade_state[ticker]['buy1_price']
+            avg_buy_price = trade_state[ticker]['total_cost'] / trade_state[ticker]['total_amount']
             if avg_buy_price is not None:
                 profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
                 execute_additional_buy(ticker, current_price, profit_rate)
@@ -312,7 +374,8 @@ def should_sell(ticker, current_price):
     if profit_rate >= profit_threshold:
         return True, "profit"
 
-    if trade_state[ticker]['buy_executed_count'] >= len(additional_buy_conditions) + 1 and profit_rate <= loss_threshold_after_final_buy:
+    max_buy_count = len(additional_buy_conditions) + 1
+    if trade_state[ticker]['buy_executed_count'] >= max_buy_count and profit_rate <= loss_threshold_after_final_buy:
         return True, "loss"
     
     return False, None
