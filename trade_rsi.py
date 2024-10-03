@@ -15,8 +15,10 @@ with open(key_file_path, 'r') as file:
 
 # 거래할 암호화폐 종목 설정
 tickers = [
-    "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA","KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO","KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI","KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI", "KRW-WAVES", "KRW-CKB", "KRW-ETC","KRW-TRX","KRW-MED",
-"KRW-GLM","KRW-BEAM","KRW-UPP","KRW-SUI","KRW-STX","KRW-GAS","KRW-BLUR","KRW-NEAR",
+    "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO",
+    "KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI", "KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI",
+    "KRW-WAVES", "KRW-CKB", "KRW-ETC", "KRW-TRX", "KRW-MED", "KRW-GLM", "KRW-BEAM", "KRW-UPP",
+    "KRW-SUI", "KRW-STX", "KRW-GAS", "KRW-BLUR", "KRW-NEAR",
 ]
 
 # 종목별 거래 상태 관리 딕셔너리 초기화
@@ -34,10 +36,10 @@ trade_state = {
 # 사용자 설정 변수들
 interval = "minute1"
 rsi_period = 14
-rsi_threshold = 27  # RSI 30 이하일 때 매수
+rsi_threshold = 27  # RSI 27 이하일 때 매수
 initial_buy_percent = 0.01
 
-profit_threshold = 0.45  # 수익률이 0.3% 이상일 때 매도
+profit_threshold = 0.45  # 수익률이 0.45% 이상일 때 매도
 loss_threshold_after_final_buy = -2.5  # 손실률이 -2.5% 이하일 때 매도
 
 # 단계별 추가 매수 조건 설정
@@ -191,7 +193,11 @@ def execute_additional_buy(ticker, current_price, profit_rate):
 
     for i, condition in enumerate(additional_buy_conditions):
         if profit_rate <= condition['trigger_loss'] and buy_executed_count == i + 1:
+            krw_balance = get_cached_balance("KRW")  # KRW 잔고 확인
             buy_amount = krw_balance * condition['buy_ratio']
+            if buy_amount < MIN_TRADE_AMOUNT:
+                print(f"{ticker} 추가 매수 금액 {buy_amount} KRW는 최소 거래 금액 이하입니다.")
+                return
             print(f"{ticker}: 손실률 {profit_rate:.2f}%, 추가 매수 {i + 2}차 진행 - {buy_amount} KRW")
             execute_buy(ticker, buy_amount)
             break
@@ -221,6 +227,12 @@ def trade_single_ticker(ticker):
                 if sell_order:
                     reset_trade_state(ticker)
                     print(f"{ticker} 매도 완료: 가격 {current_price} KRW")
+        else:
+            # 추가 매수 조건 체크 및 실행
+            avg_buy_price = trade_state[ticker]['buy1_price']
+            if avg_buy_price is not None:
+                profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
+                execute_additional_buy(ticker, current_price, profit_rate)
 
 # RSI 계산 함수
 def calculate_rsi(ticker, period=rsi_period, interval=interval):
@@ -230,11 +242,11 @@ def calculate_rsi(ticker, period=rsi_period, interval=interval):
         return None
 
     delta = df['close'].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
 
-    avg_gain = np.mean(gain[-period:])
-    avg_loss = np.mean(loss[-period:])
+    avg_gain = gain.rolling(window=period, min_periods=1).mean().iloc[-1]
+    avg_loss = loss.rolling(window=period, min_periods=1).mean().iloc[-1]
 
     if avg_loss == 0:
         return 100
@@ -246,7 +258,7 @@ def calculate_rsi(ticker, period=rsi_period, interval=interval):
 
 # RSI 매수 신호 감지
 def detect_rsi_buy_signal(ticker, rsi_threshold=rsi_threshold, interval=interval):
-    rsi = calculate_rsi(ticker, interval=interval)
+    rsi = calculate_rsi(ticker, period=rsi_period, interval=interval)
     if rsi is None:
         return False
 
@@ -278,6 +290,8 @@ def execute_buy_on_rsi_signal(ticker):
             current_price = safe_get_current_price(ticker)
             if current_price:
                 trade_state[ticker]['buy1_price'] = current_price
+                trade_state[ticker]['total_cost'] += buy_amount
+                trade_state[ticker]['total_amount'] += buy_amount / current_price
                 trade_state[ticker]['buy_executed_count'] += 1
                 print(f"{ticker} 매수 완료: 가격 {current_price} KRW")
         time.sleep(3)
@@ -286,8 +300,11 @@ def execute_buy_on_rsi_signal(ticker):
 
 # 매도 조건 확인 함수
 def should_sell(ticker, current_price):
-    avg_buy_price = trade_state[ticker]['buy1_price']
-    if avg_buy_price is None:
+    if trade_state[ticker]['total_amount'] == 0:
+        return False, None
+
+    avg_buy_price = trade_state[ticker]['total_cost'] / trade_state[ticker]['total_amount']
+    if avg_buy_price == 0:
         return False, None
     
     profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
@@ -295,7 +312,7 @@ def should_sell(ticker, current_price):
     if profit_rate >= profit_threshold:
         return True, "profit"
 
-    if trade_state[ticker]['buy_executed_count'] >= 7 and profit_rate <= loss_threshold_after_final_buy:
+    if trade_state[ticker]['buy_executed_count'] >= len(additional_buy_conditions) + 1 and profit_rate <= loss_threshold_after_final_buy:
         return True, "loss"
     
     return False, None
@@ -318,7 +335,7 @@ while True:
     for ticker in tickers:
         print(f"{ticker}의 매수 상태 확인 중...")
         trade_single_ticker(ticker)  # 매도 및 추가 매수는 손실률 기준으로 실행
-        time.sleep(1)
+        time.sleep(1/8)
 
     elapsed_time = time.time() - start_time
     if elapsed_time < 60:
