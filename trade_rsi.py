@@ -70,7 +70,7 @@ def get_cached_balance(currency, retry_count=3):
                 balance_cache = upbit.get_balances()
                 cache_timestamp = current_time
                 # print("잔고 갱신 성공")
-                
+                    
             for b in balance_cache:
                 if b['currency'] == currency and b['balance'] is not None:
                     return float(b['balance'])
@@ -148,6 +148,7 @@ def buy_crypto(ticker, amount):
     
     time.sleep(1/8)
     try:
+        print(f"{ticker} 매수 주문 제출: 금액 {amount} KRW")
         return upbit.buy_market_order(ticker, amount)
     except Exception as e:
         print(f"{ticker} 매수 오류 발생: {e}")
@@ -284,7 +285,7 @@ def execute_additional_buy(ticker, current_price, profit_rate):
             execute_buy(ticker, buy_amount)
             break
 
-# 단일 티커에 대한 매수/매도 로직 실행 함수 (외부 매도 감지 추가)
+# 단일 티커에 대한 매수/매도 로직 실행 함수 (매도 시 수익률 재확인 추가)
 def trade_single_ticker(ticker):
     current_price = safe_get_current_price(ticker)
     if current_price is None:
@@ -292,6 +293,7 @@ def trade_single_ticker(ticker):
 
     # 실제 잔고 확인
     crypto_balance = get_cached_balance(ticker.split("-")[1])
+    print(f"{ticker} 실제 잔고: {crypto_balance}")
 
     # 내부 상태와 실제 잔고 불일치 감지
     if crypto_balance == 0 and trade_state[ticker]['total_amount'] > 0:
@@ -305,15 +307,32 @@ def trade_single_ticker(ticker):
         should_sell_now, reason = should_sell(ticker, current_price)
         if should_sell_now:
             if crypto_balance > 0:
-                sell_order = sell_crypto(ticker, crypto_balance)
-                if sell_order:
-                    reset_trade_state(ticker)
-                    print(f"{ticker} 매도 완료: 수량 {crypto_balance}")
+                # 매도 직전에 수익률 재확인
+                new_current_price = safe_get_current_price(ticker)
+                if new_current_price is None:
+                    return
+                avg_buy_price = trade_state[ticker]['total_cost'] / trade_state[ticker]['total_amount']
+                new_profit_rate = ((new_current_price - avg_buy_price) / avg_buy_price) * 100
+                print(f"{ticker} 매도 직전 수익률 재확인: {new_profit_rate:.2f}%")
+
+                # 수익률 재확인 후 매도 결정
+                if (reason == "profit" and new_profit_rate >= profit_threshold) or \
+                   (reason == "loss" and new_profit_rate <= loss_threshold_after_final_buy):
+                    print(f"{ticker} 매도 조건 충족, 매도 진행")
+                    sell_order = sell_crypto(ticker, crypto_balance)
+                    if sell_order:
+                        reset_trade_state(ticker)
+                        print(f"{ticker} 매도 완료: 수량 {crypto_balance}")
+                else:
+                    print(f"{ticker} 매도 조건 변경으로 매도 취소: 현재 수익률 {new_profit_rate:.2f}%")
+            else:
+                print(f"{ticker} 매도 불가: 실제 잔고가 없습니다.")
         else:
             # 추가 매수 조건 체크 및 실행
             avg_buy_price = trade_state[ticker]['total_cost'] / trade_state[ticker]['total_amount']
             if avg_buy_price is not None:
                 profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
+                print(f"{ticker} 현재 수익률: {profit_rate:.2f}%")
                 execute_additional_buy(ticker, current_price, profit_rate)
 
 # RSI 계산 함수
@@ -393,10 +412,12 @@ def should_sell(ticker, current_price):
     profit_rate = ((current_price - avg_buy_price) / avg_buy_price) * 100
 
     if profit_rate >= profit_threshold:
+        print(f"{ticker} 수익 실현 매도 조건 충족: 수익률 {profit_rate:.2f}%")
         return True, "profit"
 
     max_buy_count = len(additional_buy_conditions) + 1
     if trade_state[ticker]['buy_executed_count'] >= max_buy_count and profit_rate <= loss_threshold_after_final_buy:
+        print(f"{ticker} 손실 제한 매도 조건 충족: 수익률 {profit_rate:.2f}%")
         return True, "loss"
     
     return False, None
@@ -417,8 +438,9 @@ while True:
     start_time = time.time()
     
     for ticker in tickers:
-        print(f"{ticker}의 매수 상태 확인 중...")
+        print(f"=== {ticker}의 매수/매도 상태 확인 시작 ===")
         trade_single_ticker(ticker)  # 매도 및 추가 매수는 손실률 기준으로 실행
+        print(f"=== {ticker}의 매수/매도 상태 확인 종료 ===\n")
         time.sleep(1/8)
 
     elapsed_time = time.time() - start_time
