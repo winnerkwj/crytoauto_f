@@ -1,12 +1,17 @@
 import time
 import numpy as np
 import pyupbit
+import os
+import pickle  # 거래 상태 저장을 위한 모듈
 
 # 최소 거래 금액 설정
 MIN_TRADE_AMOUNT = 500  # 최소 거래 금액 500 KRW
 
 # API 키 설정 파일 경로
 key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
+
+# 거래 상태 저장 파일 경로
+trade_state_file_path = 'trade_state.pkl'  # 원하는 경로로 변경 가능
 
 # API 키 읽기
 with open(key_file_path, 'r') as file:
@@ -22,16 +27,7 @@ tickers = [
 ]
 
 # 종목별 거래 상태 관리 딕셔너리 초기화
-trade_state = {
-    ticker: {
-        "buy1_price": None,  # 첫 매수 가격
-        "total_amount": 0,  # 총 매수량
-        "total_cost": 0,  # 총 매수 금액 (가중 평균 계산용)
-        "buy_executed_count": 0,  # 매수 실행 횟수
-        "sell_executed": False,  # 매도 완료 여부
-        "sell_order_id": None  # 매도 주문 ID 저장
-    } for ticker in tickers
-}
+trade_state = {}
 
 # 사용자 설정 변수들
 interval = "minute1"
@@ -70,10 +66,10 @@ def get_cached_balance(currency, retry_count=3):
     while attempt < retry_count:
         try:
             if currency == "KRW" or current_time - cache_timestamp > cache_duration:
-                print("KRW 잔고를 실시간으로 조회 중..." if currency == "KRW" else "잔고 캐시 만료, 새로 조회 중...")
+                # print("KRW 잔고를 실시간으로 조회 중..." if currency == "KRW" else "잔고 캐시 만료, 새로 조회 중...")
                 balance_cache = upbit.get_balances()
                 cache_timestamp = current_time
-                print("잔고 갱신 성공")
+                # print("잔고 갱신 성공")
                 
             for b in balance_cache:
                 if b['currency'] == currency and b['balance'] is not None:
@@ -86,21 +82,43 @@ def get_cached_balance(currency, retry_count=3):
     print(f"잔고 조회 실패, {retry_count}번 시도 후 중단")
     return 0
 
+# 거래 상태 저장 함수
+def save_trade_state():
+    try:
+        with open(trade_state_file_path, 'wb') as f:
+            pickle.dump(trade_state, f)
+        # print("거래 상태가 저장되었습니다.")
+    except Exception as e:
+        print(f"거래 상태 저장 중 오류 발생: {e}")
+
+# 거래 상태 로드 함수
+def load_trade_state():
+    global trade_state
+    if os.path.exists(trade_state_file_path):
+        try:
+            with open(trade_state_file_path, 'rb') as f:
+                trade_state = pickle.load(f)
+            print("거래 상태를 파일에서 로드했습니다.")
+        except Exception as e:
+            print(f"거래 상태 로드 중 오류 발생: {e}")
+            initialize_trade_state()
+    else:
+        initialize_trade_state()
+
 # 기존 암호화폐 잔고를 반영하여 trade_state 초기화
 def initialize_trade_state():
-    for ticker in tickers:
-        crypto_balance = get_cached_balance(ticker.split("-")[1])
-        
-        if crypto_balance > 0:
-            current_price = safe_get_current_price(ticker)
-            if current_price is None:
-                continue  # 가격을 가져오지 못하면 다음 티커로 넘어감
-            
-            trade_state[ticker]['buy1_price'] = current_price
-            trade_state[ticker]['total_amount'] = crypto_balance
-            trade_state[ticker]['total_cost'] = crypto_balance * current_price
-            trade_state[ticker]['buy_executed_count'] = 1  # 매수가 한 번 이루어진 상태로 가정
-            print(f"{ticker} 초기 잔고 {crypto_balance} 반영 완료. 현재 가격: {current_price}")
+    global trade_state
+    trade_state = {
+        ticker: {
+            "buy1_price": None,  # 첫 매수 가격
+            "total_amount": 0,  # 총 매수량
+            "total_cost": 0,  # 총 매수 금액 (가중 평균 계산용)
+            "buy_executed_count": 0,  # 매수 실행 횟수
+            "sell_executed": False,  # 매도 완료 여부
+            "sell_order_id": None  # 매도 주문 ID 저장
+        } for ticker in tickers
+    }
+    print("거래 상태를 초기화했습니다.")
 
 # 현재 가격 조회 함수
 def safe_get_current_price(ticker, retry_count=3):
@@ -216,6 +234,7 @@ def reset_trade_state(ticker):
     trade_state[ticker]['sell_executed'] = False
     trade_state[ticker]['sell_order_id'] = None
     print(f"{ticker}의 거래 상태가 초기화되었습니다.")
+    save_trade_state()  # 거래 상태 저장
 
 # 매수 실행 로직 (외부 매도 감지 추가)
 def execute_buy(ticker, buy_amount):
@@ -236,6 +255,7 @@ def execute_buy(ticker, buy_amount):
         trade_state[ticker]['total_amount'] += buy_amount / current_price
         trade_state[ticker]['buy_executed_count'] += 1
         print(f"{ticker} 매수 완료: {buy_amount} KRW 매수, 가격: {current_price} KRW")
+        save_trade_state()  # 거래 상태 저장
         return True
     return False
 
@@ -356,6 +376,7 @@ def execute_buy_on_rsi_signal(ticker):
                 trade_state[ticker]['total_amount'] += buy_amount / current_price
                 trade_state[ticker]['buy_executed_count'] += 1
                 print(f"{ticker} 매수 완료: 가격 {current_price} KRW")
+                save_trade_state()  # 거래 상태 저장
         time.sleep(3)
         return True
     return False
@@ -384,12 +405,12 @@ def should_sell(ticker, current_price):
 upbit = pyupbit.Upbit(access, secret)
 print("자동 거래 시작")
 
-# Step 1: 초기 구매 결정
+# Step 1: 거래 상태 로드 또는 초기화
+load_trade_state()
+
+# Step 2: 현재 KRW 잔고 확인
 krw_balance = get_cached_balance("KRW")
 print(f"현재 KRW 잔고: {krw_balance}")
-
-# Step 2: 기존 잔고를 반영한 trade_state 초기화
-initialize_trade_state()
 
 # Step 3: 각 티커에 대해 1분마다 거래 실행
 while True:
