@@ -3,9 +3,11 @@ import numpy as np
 import pandas as pd
 import pyupbit
 
-key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 # 2. 로그인
 # 2.1 텍스트 파일에서 Upbit API 키 읽기
+key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
+
+# API 키 읽기
 with open(key_file_path, 'r') as file:
     access = file.readline().strip()
     secret = file.readline().strip()
@@ -24,7 +26,6 @@ initial_invest_ratio = 0.01  # 잔고의 1%
 target_profit_rate = 0.0045  # 0.45%
 maintain_profit_rate = -0.005  # -0.5%
 stop_loss_rate = -0.025  # -2.5%
-rsi_diff_threshold = 2  # RSI 차이 임계값 설정
 
 # 종목별로 마지막 추가 매수 시의 RSI 값을 저장할 딕셔너리
 last_additional_buy_rsi = {ticker: None for ticker in tickers}
@@ -103,10 +104,10 @@ while True:
                     time.sleep(0.1)
                     continue
 
-                # 수익률 유지 위해 추가 매수 (RSI가 임계값 이상 낮아졌을 때만)
+                # 수익률 유지 위해 추가 매수 (RSI가 더 낮아졌을 때만)
                 if profit_rate <= maintain_profit_rate:
-                    # 이전 추가 매수 RSI보다 현재 RSI가 rsi_diff_threshold 이상 낮은지 확인
-                    if last_additional_buy_rsi[ticker] is None or rsi < last_additional_buy_rsi[ticker] - rsi_diff_threshold:
+                    # 이전 추가 매수 시의 RSI 값보다 현재 RSI가 더 낮은지 확인
+                    if last_additional_buy_rsi[ticker] is None or rsi < last_additional_buy_rsi[ticker]:
                         krw_balance = upbit.get_balance("KRW")
                         invest_amount = krw_balance * initial_invest_ratio
                         if invest_amount > 5000:
@@ -118,7 +119,7 @@ while True:
                             print(f"{ticker} 추가 매수 실패 - 잔액 부족")
                         time.sleep(0.1)
                     else:
-                        print(f"{ticker} 추가 매수 조건 미충족 - RSI가 이전보다 {rsi_diff_threshold} 이상 낮지 않음")
+                        print(f"{ticker} 추가 매수 조건 미충족 - RSI가 이전보다 낮지 않음")
                 else:
                     print(f"{ticker} 추가 매수 조건 미충족 - 수익률이 유지 수익률보다 높음")
 
