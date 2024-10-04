@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 import pyupbit
 
+key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 # 2. 로그인
 # 2.1 텍스트 파일에서 Upbit API 키 읽기
-with open("upbit_keys.txt") as f:
-    lines = f.readlines()
-    access_key = lines[0].strip()
-    secret_key = lines[1].strip()
+with open(key_file_path, 'r') as file:
+    access = file.readline().strip()
+    secret = file.readline().strip()
 
 # 2.2 API 인증키 입력
-upbit = pyupbit.Upbit(access_key, secret_key)
+upbit = pyupbit.Upbit(access, secret)
 
 # 3. 종목 리스트 (상위 시가 총액 5종목)
 tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE"]
