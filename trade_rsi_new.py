@@ -20,7 +20,7 @@ tickers = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE"]
 # 4. 변수 파트
 interval = "minute1"
 rsi_period = 20
-rsi_threshold = 27  # RSI 27 이하일 때 매수
+rsi_threshold = 24  # RSI 27 이하일 때 매수
 initial_invest_ratio = 0.01  # 잔고의 1%
 target_profit_rate = 0.0045  # 0.45%
 maintain_profit_rate = -0.005  # -0.5%
