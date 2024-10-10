@@ -9,7 +9,7 @@ key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 # 요청 제한 관리용 변수
 request_count = 0
 max_request_per_minute = 100  # 분당 최대 요청 수
-max_request_per_second = 5     # 초당 최대 요청 수
+max_request_per_second = 1     # 초당 최대 요청 수
 
 # 1. 로그인
 with open(key_file_path, 'r') as file:
@@ -21,16 +21,17 @@ upbit = pyupbit.Upbit(access, secret)
 # 2. 종목 리스트 (상위 시가 총액 20종목)
 tickers = [
     "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-EOS", "KRW-ADA", 
-    "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", "KRW-UXLINK", 
-    "KRW-ARDR", "KRW-GAS", "KRW-HBAR", "KRW-STPT", "KRW-SEI",
+    "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", "KRW-UXLINK", "KRW-HBAR", "KRW-STPT", "KRW-SEI",
     "KRW-ZRO", "KRW-HIVE", "KRW-SOL", "KRW-HIFI", "KRW-TFUEL", 
-    "KRW-WAVES", "KRW-CVC", "KRW-W"
+    "KRW-WAVES", "KRW-CVC", "KRW-W", "KRW-ARK", "KRW-STX", 
+    "KRW-UPP", "KRW-CHZ", "KRW-SNT", "KRW-BLUR", "KRW-APT", 
+    "KRW-DKA", "KRW-ATH", "KRW-NEAR", "KRW-ONG","KRW-SUI","KRW-ORBS",
 ]
 
 # 3. 변수 설정
 rsi_period = 14
-rsi_threshold = 21  # RSI 21 이하일 때 매수
-initial_invest_ratio = 0.01  # 잔고의 1%
+rsi_threshold = 20  # RSI 21 이하일 때 매수
+initial_invest_ratio = 0.005  # 잔고의 0.5%
 target_profit_rate = 0.0045  # 목표 수익률 0.45%
 stop_loss_rate = -0.025  # 손절매 -2.5%
 maintain_profit_rate = -0.005  # 추가 매수를 위한 수익률 조건
@@ -39,12 +40,12 @@ maintain_profit_rate = -0.005  # 추가 매수를 위한 수익률 조건
 async def rate_limit_check():
     global request_count
     if request_count >= max_request_per_minute:
-        print("분당 요청 제한 도달, 60초 대기 중...")
-        await asyncio.sleep(60)
+        print("분당 요청 제한 도달, 10초 대기 중...")
+        await asyncio.sleep(10)
         request_count = 0
     elif request_count % max_request_per_second == 0:
         print("초당 요청 제한 도달, 1초 대기 중...")
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.2)
 
 # 4. RSI 계산 함수
 def get_rsi(ticker):
@@ -63,45 +64,51 @@ def get_rsi(ticker):
     rsi = 100 - (100 / (1 + rs))
     return rsi.iloc[-1]  # 가장 최근 RSI 값
 
-# 5. 현재가 매수 후 미체결 시 재주문
-def place_buy_order(ticker, krw_balance, invest_amount):
+# 5. 현재가 매수 후 미체결 시 재주문 (최대 3회 재시도)
+def place_buy_order(ticker, krw_balance, invest_amount, attempt=1):
     current_price = pyupbit.get_current_price(ticker)  # 현재가 확인
     try:
         # 현재가 매수
         order = upbit.buy_limit_order(ticker, current_price, invest_amount / current_price)
-        print(f"{ticker} 현재가 매수 주문 - 가격: {current_price}, 금액: {invest_amount} KRW")
+        print(f"{ticker} 현재가 매수 주문 - 가격: {current_price}, 금액: {invest_amount} KRW, 시도 횟수: {attempt}")
 
         time.sleep(10)  # 10초 대기 후 체결 확인
         order_info = upbit.get_order(order['uuid'])  # 주문 정보 가져오기
 
-        # 미체결 시 주문 취소 및 재주문
+        # 미체결 시 주문 취소 및 재주문 (최대 3회 재시도)
         if order_info['state'] != 'done':  # 주문이 체결되지 않음
             print(f"{ticker} 매수 주문 미체결 - 주문 취소 후 재시도")
             upbit.cancel_order(order['uuid'])
             time.sleep(1)
-            place_buy_order(ticker, krw_balance, invest_amount)  # 재주문
+            if attempt < 3:
+                place_buy_order(ticker, krw_balance, invest_amount, attempt + 1)  # 재주문
+            else:
+                print(f"{ticker} 매수 주문 3회 시도 후 미체결, 다음으로 넘어갑니다.")
         else:
             print(f"{ticker} 매수 주문 체결 완료 - 가격: {current_price}")
     except Exception as e:
         print(f"{ticker} 매수 주문 실패: {e}")
 
-# 6. 현재가 매도 후 미체결 시 재주문
-def place_sell_order(ticker, balance):
+# 6. 현재가 매도 후 미체결 시 재주문 (최대 3회 재시도)
+def place_sell_order(ticker, balance, attempt=1):
     current_price = pyupbit.get_current_price(ticker)  # 현재가 확인
     try:
         # 현재가 매도
         order = upbit.sell_limit_order(ticker, current_price, balance)
-        print(f"{ticker} 현재가 매도 주문 - 가격: {current_price}, 수량: {balance}")
+        print(f"{ticker} 현재가 매도 주문 - 가격: {current_price}, 수량: {balance}, 시도 횟수: {attempt}")
 
         time.sleep(10)  # 10초 대기 후 체결 확인
         order_info = upbit.get_order(order['uuid'])  # 주문 정보 가져오기
 
-        # 미체결 시 주문 취소 및 재주문
+        # 미체결 시 주문 취소 및 재주문 (최대 3회 재시도)
         if order_info['state'] != 'done':  # 주문이 체결되지 않음
             print(f"{ticker} 매도 주문 미체결 - 주문 취소 후 재시도")
             upbit.cancel_order(order['uuid'])
             time.sleep(1)
-            place_sell_order(ticker, balance)  # 재주문
+            if attempt < 3:
+                place_sell_order(ticker, balance, attempt + 1)  # 재주문
+            else:
+                print(f"{ticker} 매도 주문 3회 시도 후 미체결, 다음으로 넘어갑니다.")
         else:
             print(f"{ticker} 매도 주문 체결 완료 - 가격: {current_price}")
     except Exception as e:
@@ -154,7 +161,7 @@ async def watch_price(tickers):
                                 continue
                             
                             # **추가 매수 조건**: 수익률이 -0.5% 이하이고, RSI가 21 이하일 때 추가 매수
-                            if profit_rate <= maintain_profit_rate and get_rsi(ticker) < rsi_threshold:
+                            if profit_rate <= maintain_profit_rate and get_rsi(ticker) < 21:
                                 krw_balance = upbit.get_balance("KRW")
                                 invest_amount = krw_balance * initial_invest_ratio * 2  # 2배로 추가 매수
                                 fee = invest_amount * 0.0005  # 수수료 계산
