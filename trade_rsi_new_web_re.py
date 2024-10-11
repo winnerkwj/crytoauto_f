@@ -81,8 +81,8 @@ async def get_top_volume_tickers(limit=30):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 30          # RSI가 30 이하일 때 매수
-rsi_threshold_additional = 30  # 추가 매수를 위한 RSI 임계값 (30 이하)
+rsi_threshold = 25          # RSI가 30 이하일 때 매수
+rsi_threshold_additional = 26  # 추가 매수를 위한 RSI 임계값 (30 이하)
 initial_invest_ratio = 0.005  # 초기 투자 비율 (잔고의 0.5%)
 target_profit_rate = 0.0045   # 목표 수익률 (0.45%)
 stop_loss_rate = -0.025       # 손절매 기준 (-2.5%)
