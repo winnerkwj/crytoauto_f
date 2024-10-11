@@ -18,7 +18,7 @@ with open(key_file_path, 'r') as file:
 
 upbit = pyupbit.Upbit(access, secret)
 
-# 2. 종목 리스트 (상위 시가 총액 20종목)
+# 2. 종목 리스트 (상위 시가 총액 33종목)
 tickers = [
     "KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-EOS", "KRW-ADA", 
     "KRW-DOGE", "KRW-LOOM", "KRW-SHIB", "KRW-NEO", "KRW-UXLINK", "KRW-HBAR", "KRW-STPT", "KRW-SEI",
