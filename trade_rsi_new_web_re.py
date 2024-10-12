@@ -84,7 +84,7 @@ rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
 rsi_threshold = 25          # RSI가 30 이하일 때 매수
 rsi_threshold_additional = 26  # 추가 매수를 위한 RSI 임계값 (30 이하)
 initial_invest_ratio = 0.005  # 초기 투자 비율 (잔고의 0.5%)
-target_profit_rate = 0.0045   # 목표 수익률 (0.45%)
+target_profit_rate = 0.0035   # 목표 수익률 (0.35%) 수수료 고려
 stop_loss_rate = -0.025       # 손절매 기준 (-2.5%)
 maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
@@ -183,7 +183,8 @@ async def place_sell_order(ticker, balance):
             await asyncio.sleep(1)  # 오류 발생 시 잠시 대기 후 재시도
     logging.error(f"{ticker} 매도 주문 실패 - 최대 시도 횟수 초과")  # 최대 시도 횟수를 초과하면 실패 메시지 출력
 
-# 8. 실시간 가격 모니터링 함수
+
+# 8. 실시간 가격 모니터링 함수 (수정된 부분)
 async def watch_price():
     url = "wss://api.upbit.com/websocket/v1"
     previous_prices = {}
@@ -232,11 +233,15 @@ async def watch_price():
                             avg_buy_price = upbit.get_avg_buy_price(ticker)
 
                         if balance > 0:
-                            profit_rate = (current_price - avg_buy_price) / avg_buy_price
+                            # 수수료를 고려한 평균 매수가와 현재가 계산
+                            avg_buy_price_fee = float(avg_buy_price) * 1.0005
+                            current_price_fee = float(current_price) * 0.9995
+                            # 수익률 계산
+                            profit_rate = (current_price_fee - avg_buy_price_fee) / avg_buy_price_fee
 
                             # 수익률 변동이 있을 때만 출력
                             if ticker not in previous_profit_rates or abs(previous_profit_rates[ticker] - profit_rate) >= 0.0001:
-                                logging.info(f"{ticker} 보유 수량: {balance}, 수익률: {profit_rate*100:.2f}%")
+                                logging.info(f"{ticker} 보유 수량: {balance}, 수익률: {profit_rate*100+0.1:.2f}%")
                                 previous_profit_rates[ticker] = profit_rate
 
                             if profit_rate >= target_profit_rate:
@@ -250,7 +255,7 @@ async def watch_price():
                                     logging.info(f"{ticker} RSI: {rsi:.2f}")
                                     async with non_order_request_limiter:
                                         krw_balance = upbit.get_balance("KRW")
-                                    invest_amount = krw_balance * initial_invest_ratio * 2
+                                    invest_amount = krw_balance * initial_invest_ratio
                                     fee = invest_amount * 0.0005
                                     total_invest_amount = invest_amount + fee
                                     if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
