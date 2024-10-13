@@ -84,12 +84,25 @@ rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
 rsi_threshold = 23          # RSI가 23 이하일 때 매수
 rsi_threshold_additional = 29  # 추가 매수를 위한 RSI 임계값 (29 이하)
 initial_invest_ratio = 0.005  # 초기 투자 비율 (잔고의 0.5%)
-target_profit_rate = 0.0035   # 목표 수익률 (0.35%) 수수료 고려
+target_profit_rate = 0.0035   # 목표 수익률 (0.35%)
 stop_loss_rate = -0.025       # 손절매 기준 (-2.5%)
 maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
 # RSI 계산 주기 (초 단위)
-rsi_calculation_interval = 60  # 1분마다 RSI 계산
+rsi_calculation_interval = 2  # 1분마다 RSI 계산
+
+# 추가 매수를 위한 최소 보유 시간 (초 단위)
+min_hold_time_for_additional_buy = 10  # 10초
+
+# 종목별 보유 시작 시간 저장 딕셔너리
+hold_start_time = {}
+
+# 종목별 추가 매수 횟수 저장 딕셔너리
+additional_buy_count = defaultdict(int)
+max_additional_buys = 100  # 종목별 최대 추가 매수 횟수
+
+# 보유 종목 리스트 관리 딕셔너리
+holding_tickers = {}  # 종목별 보유 수량 저장
 
 # 4. RSI 값 캐싱을 위한 딕셔너리 및 타임스탬프
 rsi_cache = {}
@@ -144,6 +157,9 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
                 logging.info(f"{ticker} 매수 주문 체결 완료")
+                # 보유 종목 리스트에 추가
+                holding_tickers[ticker] = upbit.get_balance(ticker)
+                hold_start_time[ticker] = time.time()  # 보유 시작 시간 저장
                 return  # 주문이 체결되면 함수 종료
             else:
                 logging.info(f"{ticker} 매수 주문 미체결 - 주문 취소 후 재시도")
@@ -172,6 +188,12 @@ async def place_sell_order(ticker, balance):
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
                 logging.info(f"{ticker} 매도 주문 체결 완료")
+                # 보유 종목 리스트에서 제거
+                holding_tickers.pop(ticker, None)
+                # 추가 매수 횟수 초기화
+                additional_buy_count.pop(ticker, None)
+                # 보유 시작 시간 초기화
+                hold_start_time.pop(ticker, None)
                 return  # 주문이 체결되면 함수 종료
             else:
                 logging.info(f"{ticker} 매도 주문 미체결 - 주문 취소 후 재시도")
@@ -199,11 +221,14 @@ async def watch_price():
             last_update = time.time()
             logging.info("상위 거래량 종목 리스트 갱신")
 
+        # 보유 종목 리스트와 합치기
+        all_tickers = list(set(tickers + list(holding_tickers.keys())))
+
         try:
             async with websockets.connect(url, ping_interval=60, ping_timeout=10) as websocket:
                 subscribe_data = [
                     {"ticket": "test"},
-                    {"type": "ticker", "codes": tickers, "isOnlyRealtime": True},
+                    {"type": "ticker", "codes": all_tickers, "isOnlyRealtime": True},
                     {"format": "SIMPLE"}
                 ]
                 await websocket.send(json.dumps(subscribe_data))
@@ -233,35 +258,41 @@ async def watch_price():
                             avg_buy_price = upbit.get_avg_buy_price(ticker)
 
                         if balance > 0:
-                            # 수수료를 고려한 평균 매수가와 현재가 계산
-                            avg_buy_price_fee = float(avg_buy_price) * 1.0005
-                            current_price_fee = float(current_price) * 0.9995
-                            # 수익률 계산
-                            profit_rate = (current_price_fee - avg_buy_price_fee) / avg_buy_price_fee
+                            # 수익률 계산 (수수료 미고려)
+                            profit_rate = (current_price - float(avg_buy_price)) / float(avg_buy_price)
 
                             # 수익률 변동이 있을 때만 출력
                             if ticker not in previous_profit_rates or abs(previous_profit_rates[ticker] - profit_rate) >= 0.0001:
-                                logging.info(f"{ticker} 보유 수량: {balance}, 수익률: {profit_rate*100+0.1:.2f}%")
+                                logging.info(f"{ticker} 보유 수량: {balance}, 수익률: {profit_rate*100:.2f}%")
                                 previous_profit_rates[ticker] = profit_rate
 
-                            if profit_rate >= target_profit_rate:
+                            # 수수료를 고려한 목표 수익률 및 손절매 수익률
+                            adjusted_target_profit_rate = target_profit_rate + 0.001  # 0.1% 추가
+                            adjusted_stop_loss_rate = stop_loss_rate - 0.001          # 0.1% 추가
+
+                            if profit_rate >= adjusted_target_profit_rate:
                                 await place_sell_order(ticker, balance)
                                 continue
-                            if profit_rate <= stop_loss_rate:
+                            if profit_rate <= adjusted_stop_loss_rate:
                                 await place_sell_order(ticker, balance)
                                 continue
                             if profit_rate <= maintain_profit_rate:
-                                if rsi is not None and rsi < rsi_threshold_additional:
-                                    logging.info(f"{ticker} RSI: {rsi:.2f}")
-                                    async with non_order_request_limiter:
-                                        krw_balance = upbit.get_balance("KRW")
-                                    invest_amount = krw_balance * initial_invest_ratio
-                                    fee = invest_amount * 0.0005
-                                    total_invest_amount = invest_amount + fee
-                                    if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
-                                        await place_buy_order(ticker, krw_balance, invest_amount)
-                                    else:
-                                        logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
+                                # 최소 보유 시간이 지났는지 확인
+                                if ticker in hold_start_time and time.time() - hold_start_time[ticker] >= min_hold_time_for_additional_buy:
+                                    # 추가 매수 횟수 확인
+                                    if additional_buy_count[ticker] < max_additional_buys:
+                                        if rsi is not None and rsi < rsi_threshold_additional:
+                                            logging.info(f"{ticker} RSI: {rsi:.2f}")
+                                            async with non_order_request_limiter:
+                                                krw_balance = upbit.get_balance("KRW")
+                                            invest_amount = krw_balance * initial_invest_ratio
+                                            fee = invest_amount * 0.0005
+                                            total_invest_amount = invest_amount + fee
+                                            if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
+                                                await place_buy_order(ticker, krw_balance, invest_amount)
+                                                additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
+                                            else:
+                                                logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
                         else:
                             if rsi is not None and rsi < rsi_threshold:
                                 async with order_lock:
