@@ -58,7 +58,7 @@ non_order_request_limiter = RateLimiter(max_calls=30, period=1.0)  # 주문 외 
 public_api_limiters = defaultdict(lambda: RateLimiter(max_calls=10, period=1.0))  # 엔드포인트별로 요청 제한 관리
 
 # 2. 동적 종목 리스트 생성 (상위 거래량 30종목)
-async def get_top_volume_tickers(limit=60):
+async def get_top_volume_tickers(limit=30):
     endpoint = 'get_tickers'
     async with public_api_limiters[endpoint]:
         tickers = pyupbit.get_tickers(fiat="KRW")  # 원화로 거래되는 모든 종목 코드 가져오기
@@ -81,7 +81,7 @@ async def get_top_volume_tickers(limit=60):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 19          # RSI가 21 이하일 때 매수
+rsi_threshold = 19          # RSI가 19 이하일 때 매수
 rsi_threshold_additional = 29  # 추가 매수를 위한 RSI 임계값 (29 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
 target_profit_rate = 0.0035   # 목표 수익률 (0.35%)
@@ -89,10 +89,10 @@ stop_loss_rate = -0.028       # 손절매 기준 (-2.8%)
 maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
 # RSI 계산 주기 (초 단위)
-rsi_calculation_interval = 2  # 1분마다 RSI 계산
+rsi_calculation_interval = 2  # 2초마다 RSI 계산
 
 # 추가 매수를 위한 최소 보유 시간 (초 단위)
-min_hold_time_for_additional_buy = 2  # 2초
+min_hold_time_for_additional_buy = 10  # 10초
 
 # 종목별 보유 시작 시간 저장 딕셔너리
 hold_start_time = {}
@@ -103,6 +103,9 @@ max_additional_buys = 100  # 종목별 최대 추가 매수 횟수
 
 # 보유 종목 리스트 관리 딕셔너리
 holding_tickers = {}  # 종목별 보유 수량 저장
+
+# 주문 상태 관리 딕셔너리 (주문 UUID 저장)
+order_status = defaultdict(lambda: None)
 
 # 4. RSI 값 캐싱을 위한 딕셔너리 및 타임스탬프
 rsi_cache = {}
@@ -140,9 +143,16 @@ async def get_rsi(ticker):
         logging.error(f"{ticker} RSI 계산 중 오류 발생: {e}")
         return None  # 오류 발생 시 None 반환
 
-# 6. 현재가 매수 후 미체결 시 재주문 (최대 1회 재시도)
+# 6. 현재가 매수 후 미체결 시 재주문 (최대 3회 재시도)
 async def place_buy_order(ticker, krw_balance, invest_amount):
-    max_attempts = 1  # 최대 시도 횟수 설정
+    # 기존 주문이 있는지 확인하고 취소
+    if order_status[ticker]:
+        logging.info(f"{ticker} 기존 매수 주문 취소 중...")
+        async with non_order_request_limiter:
+            upbit.cancel_order(order_status[ticker])
+        order_status[ticker] = None  # 주문 상태 초기화
+
+    max_attempts = 3  # 최대 시도 횟수 설정
     for attempt in range(1, max_attempts + 1):
         endpoint = 'current_price'
         async with public_api_limiters[endpoint]:
@@ -151,8 +161,9 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
             async with order_request_limiter:
                 # 현재가로 지정가 매수 주문
                 order = upbit.buy_limit_order(ticker, current_price, invest_amount / current_price)
+                order_status[ticker] = order['uuid']  # 주문 상태에 주문 UUID 저장
             logging.info(f"{ticker} 매수 주문 시도 {attempt}회차 - 가격: {current_price}, 금액: {invest_amount} KRW")
-            await asyncio.sleep(1)  # 주문 체결 대기 시간
+            await asyncio.sleep(10)  # 주문 체결 대기 시간
             async with non_order_request_limiter:
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
@@ -160,20 +171,30 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                 # 보유 종목 리스트에 추가
                 holding_tickers[ticker] = upbit.get_balance(ticker)
                 hold_start_time[ticker] = time.time()  # 보유 시작 시간 저장
+                order_status[ticker] = None  # 주문 상태 초기화
                 return  # 주문이 체결되면 함수 종료
             else:
                 logging.info(f"{ticker} 매수 주문 미체결 - 주문 취소 후 재시도")
                 async with non_order_request_limiter:
                     upbit.cancel_order(order['uuid'])  # 미체결 주문 취소
+                order_status[ticker] = None  # 주문 상태 초기화
                 await asyncio.sleep(1)  # 잠시 대기 후 재시도
         except Exception as e:
             logging.error(f"{ticker} 매수 주문 실패: {e}")
+            order_status[ticker] = None  # 주문 상태 초기화
             await asyncio.sleep(1)  # 오류 발생 시 잠시 대기 후 재시도
     logging.error(f"{ticker} 매수 주문 실패 - 최대 시도 횟수 초과")  # 최대 시도 횟수를 초과하면 실패 메시지 출력
 
-# 7. 현재가 매도 후 미체결 시 재주문 (최대 1회 재시도)
+# 7. 현재가 매도 후 미체결 시 재주문 (최대 3회 재시도)
 async def place_sell_order(ticker, balance):
-    max_attempts = 1  # 최대 시도 횟수 설정
+    # 기존 주문이 있는지 확인하고 취소
+    if order_status[ticker]:
+        logging.info(f"{ticker} 기존 매도 주문 취소 중...")
+        async with non_order_request_limiter:
+            upbit.cancel_order(order_status[ticker])
+        order_status[ticker] = None  # 주문 상태 초기화
+
+    max_attempts = 3  # 최대 시도 횟수 설정
     for attempt in range(1, max_attempts + 1):
         endpoint = 'current_price'
         async with public_api_limiters[endpoint]:
@@ -182,8 +203,9 @@ async def place_sell_order(ticker, balance):
             async with order_request_limiter:
                 # 현재가로 지정가 매도 주문
                 order = upbit.sell_limit_order(ticker, current_price, balance)
+                order_status[ticker] = order['uuid']  # 주문 상태에 주문 UUID 저장
             logging.info(f"{ticker} 매도 주문 시도 {attempt}회차 - 가격: {current_price}, 수량: {balance}")
-            await asyncio.sleep(1)  # 주문 체결 대기 시간
+            await asyncio.sleep(10)  # 주문 체결 대기 시간
             async with non_order_request_limiter:
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
@@ -194,14 +216,17 @@ async def place_sell_order(ticker, balance):
                 additional_buy_count.pop(ticker, None)
                 # 보유 시작 시간 초기화
                 hold_start_time.pop(ticker, None)
+                order_status[ticker] = None  # 주문 상태 초기화
                 return  # 주문이 체결되면 함수 종료
             else:
                 logging.info(f"{ticker} 매도 주문 미체결 - 주문 취소 후 재시도")
                 async with non_order_request_limiter:
                     upbit.cancel_order(order['uuid'])  # 미체결 주문 취소
+                order_status[ticker] = None  # 주문 상태 초기화
                 await asyncio.sleep(1)  # 잠시 대기 후 재시도
         except Exception as e:
             logging.error(f"{ticker} 매도 주문 실패: {e}")
+            order_status[ticker] = None  # 주문 상태 초기화
             await asyncio.sleep(1)  # 오류 발생 시 잠시 대기 후 재시도
     logging.error(f"{ticker} 매도 주문 실패 - 최대 시도 횟수 초과")  # 최대 시도 횟수를 초과하면 실패 메시지 출력
 
@@ -271,10 +296,22 @@ async def watch_price():
                             adjusted_stop_loss_rate = stop_loss_rate - 0.001          # 0.1% 추가
 
                             if profit_rate >= adjusted_target_profit_rate:
-                                await place_sell_order(ticker, balance)
+                                # 매도 주문 실행 전에 기존 주문 취소
+                                if order_status[ticker]:
+                                    logging.info(f"{ticker} 기존 주문 취소 중...")
+                                    async with non_order_request_limiter:
+                                        upbit.cancel_order(order_status[ticker])
+                                    order_status[ticker] = None
+                                asyncio.create_task(place_sell_order(ticker, balance))
                                 continue
                             if profit_rate <= adjusted_stop_loss_rate:
-                                await place_sell_order(ticker, balance)
+                                # 매도 주문 실행 전에 기존 주문 취소
+                                if order_status[ticker]:
+                                    logging.info(f"{ticker} 기존 주문 취소 중...")
+                                    async with non_order_request_limiter:
+                                        upbit.cancel_order(order_status[ticker])
+                                    order_status[ticker] = None
+                                asyncio.create_task(place_sell_order(ticker, balance))
                                 continue
                             if profit_rate <= maintain_profit_rate:
                                 # 최소 보유 시간이 지났는지 확인
@@ -289,7 +326,13 @@ async def watch_price():
                                             fee = invest_amount * 0.0005
                                             total_invest_amount = invest_amount + fee
                                             if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
-                                                await place_buy_order(ticker, krw_balance, invest_amount)
+                                                # 매수 주문 실행 전에 기존 주문 취소
+                                                if order_status[ticker]:
+                                                    logging.info(f"{ticker} 기존 주문 취소 중...")
+                                                    async with non_order_request_limiter:
+                                                        upbit.cancel_order(order_status[ticker])
+                                                    order_status[ticker] = None
+                                                asyncio.create_task(place_buy_order(ticker, krw_balance, invest_amount))
                                                 additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
                                             else:
                                                 logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
@@ -305,7 +348,13 @@ async def watch_price():
                                             krw_balance = upbit.get_balance("KRW")
                                         invest_amount = krw_balance * initial_invest_ratio
                                         if invest_amount > 5000:
-                                            await place_buy_order(ticker, krw_balance, invest_amount)
+                                            # 매수 주문 실행 전에 기존 주문 취소
+                                            if order_status[ticker]:
+                                                logging.info(f"{ticker} 기존 주문 취소 중...")
+                                                async with non_order_request_limiter:
+                                                    upbit.cancel_order(order_status[ticker])
+                                                order_status[ticker] = None
+                                            asyncio.create_task(place_buy_order(ticker, krw_balance, invest_amount))
                                         else:
                                             logging.info(f"{ticker} 매수 실패 - 잔고 부족")
                         await asyncio.sleep(0.1)  # 대기 시간 최소화
@@ -332,3 +381,9 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("프로그램이 사용자에 의해 중단되었습니다.")
+
+
+
+
+
+####################################3회 시도후 재 주문 안됨############################################
