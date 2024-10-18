@@ -57,8 +57,8 @@ non_order_request_limiter = RateLimiter(max_calls=30, period=1.0)  # 주문 외 
 # QUOTATION API 요청 제한 (엔드포인트별로 관리)
 public_api_limiters = defaultdict(lambda: RateLimiter(max_calls=10, period=1.0))  # 엔드포인트별로 요청 제한 관리
 
-# 2. 동적 종목 리스트 생성 (상위 거래량 30종목)
-async def get_top_volume_tickers(limit=60):
+# 2. 동적 종목 리스트 생성 (상위 거래량 15종목)
+async def get_top_volume_tickers(limit=30):
     endpoint = 'get_tickers'
     async with public_api_limiters[endpoint]:
         tickers = pyupbit.get_tickers(fiat="KRW")  # 원화로 거래되는 모든 종목 코드 가져오기
@@ -81,18 +81,18 @@ async def get_top_volume_tickers(limit=60):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 19          # RSI가 21 이하일 때 매수
-rsi_threshold_additional = 29  # 추가 매수를 위한 RSI 임계값 (29 이하)
+rsi_threshold = 18          # RSI가 21 이하일 때 매수
+rsi_threshold_additional = 35  # 추가 매수를 위한 RSI 임계값 (29 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
 target_profit_rate = 0.0035   # 목표 수익률 (0.35%)
-stop_loss_rate = -0.028       # 손절매 기준 (-2.8%)
+stop_loss_rate = -0.028       # 손절매 기준 (-2.5%)
 maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
 # RSI 계산 주기 (초 단위)
-rsi_calculation_interval = 2  # 1분마다 RSI 계산
+rsi_calculation_interval = 5  # 5초마다 RSI 계산
 
 # 추가 매수를 위한 최소 보유 시간 (초 단위)
-min_hold_time_for_additional_buy = 2  # 2초
+min_hold_time_for_additional_buy = 3  # 3초
 
 # 종목별 보유 시작 시간 저장 딕셔너리
 hold_start_time = {}
@@ -152,7 +152,7 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                 # 현재가로 지정가 매수 주문
                 order = upbit.buy_limit_order(ticker, current_price, invest_amount / current_price)
             logging.info(f"{ticker} 매수 주문 시도 {attempt}회차 - 가격: {current_price}, 금액: {invest_amount} KRW")
-            await asyncio.sleep(1)  # 주문 체결 대기 시간
+            await asyncio.sleep(10)  # 주문 체결 대기 시간
             async with non_order_request_limiter:
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
@@ -171,7 +171,7 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
             await asyncio.sleep(1)  # 오류 발생 시 잠시 대기 후 재시도
     logging.error(f"{ticker} 매수 주문 실패 - 최대 시도 횟수 초과")  # 최대 시도 횟수를 초과하면 실패 메시지 출력
 
-# 7. 현재가 매도 후 미체결 시 재주문 (최대 1회 재시도)
+# 7. 현재가 매도 후 미체결 시 재주문 (최대 3회 재시도)
 async def place_sell_order(ticker, balance):
     max_attempts = 1  # 최대 시도 횟수 설정
     for attempt in range(1, max_attempts + 1):
@@ -183,7 +183,7 @@ async def place_sell_order(ticker, balance):
                 # 현재가로 지정가 매도 주문
                 order = upbit.sell_limit_order(ticker, current_price, balance)
             logging.info(f"{ticker} 매도 주문 시도 {attempt}회차 - 가격: {current_price}, 수량: {balance}")
-            await asyncio.sleep(1)  # 주문 체결 대기 시간
+            await asyncio.sleep(10)  # 주문 체결 대기 시간
             async with non_order_request_limiter:
                 order_info = upbit.get_order(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
@@ -317,10 +317,10 @@ async def watch_price():
 
         except websockets.exceptions.ConnectionClosedError as e:
             logging.warning(f"웹소켓 연결 끊김, 재연결 시도 중: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
         except Exception as e:
             logging.error(f"예기치 못한 오류 발생: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
 # 9. 메인 함수
 async def main():
