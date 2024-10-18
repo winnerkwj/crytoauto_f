@@ -81,11 +81,11 @@ async def get_top_volume_tickers(limit=30):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 18          # RSI가 21 이하일 때 매수
-rsi_threshold_additional = 35  # 추가 매수를 위한 RSI 임계값 (29 이하)
+rsi_threshold = 18          # RSI가 18 이하일 때 매수
+rsi_threshold_additional = 35  # 추가 매수를 위한 RSI 임계값 (35 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
 target_profit_rate = 0.0035   # 목표 수익률 (0.35%)
-stop_loss_rate = -0.028       # 손절매 기준 (-2.5%)
+stop_loss_rate = -0.028       # 손절매 기준 (-2.8%)
 maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
 # RSI 계산 주기 (초 단위)
@@ -171,7 +171,7 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
             await asyncio.sleep(1)  # 오류 발생 시 잠시 대기 후 재시도
     logging.error(f"{ticker} 매수 주문 실패 - 최대 시도 횟수 초과")  # 최대 시도 횟수를 초과하면 실패 메시지 출력
 
-# 7. 현재가 매도 후 미체결 시 재주문 (최대 3회 재시도)
+# 7. 현재가 매도 후 미체결 시 재주문 (최대 1회 재시도)
 async def place_sell_order(ticker, balance):
     max_attempts = 1  # 최대 시도 횟수 설정
     for attempt in range(1, max_attempts + 1):
@@ -258,6 +258,12 @@ async def watch_price():
                             avg_buy_price = upbit.get_avg_buy_price(ticker)
 
                         if balance > 0:
+                            # 보유 종목 리스트에 추가 (이미 추가되어 있지 않다면)
+                            if ticker not in holding_tickers:
+                                holding_tickers[ticker] = balance
+                                hold_start_time[ticker] = time.time()  # 보유 시작 시간 저장
+                                additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
+
                             # 수익률 계산 (수수료 미고려)
                             profit_rate = (current_price - float(avg_buy_price)) / float(avg_buy_price)
 
@@ -324,6 +330,20 @@ async def watch_price():
 
 # 9. 메인 함수
 async def main():
+    # 프로그램 시작 시 현재 보유 중인 암호화폐 정보를 초기화
+    async with non_order_request_limiter:
+        balances = upbit.get_balances()
+    for balance in balances:
+        ticker = balance['currency']
+        if ticker == 'KRW':
+            continue  # 원화는 제외
+        ticker = 'KRW-' + ticker
+        amount = float(balance['balance'])
+        if amount > 0:
+            holding_tickers[ticker] = amount
+            hold_start_time[ticker] = time.time()
+            additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
+            logging.info(f"기존 보유 종목 추가: {ticker}, 수량: {amount}")
     await watch_price()
 
 # 프로그램 시작
