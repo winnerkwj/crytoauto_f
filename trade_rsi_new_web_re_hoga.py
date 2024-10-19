@@ -15,6 +15,9 @@ key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# 제외할 암호화폐 목록 (예시로 비트코인 제외)
+excluded_tickers = ['KRW-BTC']
+
 # 요청 제한을 관리하는 클래스 정의
 class RateLimiter:
     def __init__(self, max_calls, period=1.0):
@@ -79,24 +82,25 @@ async def get_top_volume_tickers(limit=10):
 
     # 각 종목의 24시간 누적 거래대금을 기준으로 내림차순 정렬
     data.sort(key=lambda x: x['acc_trade_price_24h'], reverse=True)
-    # 상위 limit 개수만큼의 종목 코드를 리스트로 추출
-    top_tickers = [x['market'] for x in data[:limit]]
+    # 상위 limit 개수만큼의 종목 코드를 리스트로 추출하고, 제외할 암호화폐 제거
+    top_tickers = [x['market'] for x in data if x['market'] not in excluded_tickers]
+    top_tickers = top_tickers[:limit]
     return top_tickers  # 상위 거래량 종목 리스트 반환
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 23          # RSI가 28 이하일 때 매수
+rsi_threshold = 23          # RSI가 23 이하일 때 매수
 rsi_threshold_additional = 50  # 추가 매수를 위한 RSI 임계값 (50 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
-target_profit_rate = 0.0012   # 목표 수익률 (0.15%)
+target_profit_rate = 0.0012   # 목표 수익률 (0.12%)
 stop_loss_rate = -0.028       # 손절매 기준 (-2.8%)
 maintain_profit_rate = -0.003 # 추가 매수 기준 수익률 (-0.3%)
 
 # RSI 계산 주기 (초 단위)
-rsi_calculation_interval = 2  # 5초마다 RSI 계산
+rsi_calculation_interval = 2  # 2초마다 RSI 계산
 
 # 추가 매수를 위한 최소 보유 시간 (초 단위)
-min_hold_time_for_additional_buy = 0  # 3초
+min_hold_time_for_additional_buy = 0  # 0초
 
 # 종목별 보유 시작 시간 저장 딕셔너리
 hold_start_time = {}
@@ -369,6 +373,9 @@ async def watch_price():
         # 보유 종목 리스트와 합치기
         all_tickers = list(set(tickers + list(holding_tickers.keys())))
 
+        # 제외할 암호화폐 제거
+        all_tickers = [ticker for ticker in all_tickers if ticker not in excluded_tickers]
+
         try:
             async with websockets.connect(url, ping_interval=60, ping_timeout=10) as websocket:
                 subscribe_data = [
@@ -460,6 +467,10 @@ async def watch_price():
 
                             # 수익률이 maintain_profit_rate 이하로 떨어졌는지 확인
                             elif profit_rate <= maintain_profit_rate:
+                                logging.info(f"{ticker} 수익률이 maintain_profit_rate 이하로 떨어짐 - 수익률: {profit_rate*100:.2f}%")
+                                logging.info(f"{ticker} 추가 매수 횟수: {additional_buy_count[ticker]}, 최대 추가 매수 횟수: {max_additional_buys}")
+                                logging.info(f"{ticker} 현재 RSI 값: {rsi}")
+
                                 # 기존 매도 주문 취소
                                 if sell_order_uuid[ticker]:
                                     logging.info(f"{ticker} 매도 주문 취소 진행 중...")
@@ -472,27 +483,30 @@ async def watch_price():
                                         logging.error(f"{ticker} 매도 주문 취소 실패: {e}")
 
                                 # 추가 매수 진행
-                                if additional_buy_count[ticker] < max_additional_buys:
-                                    if rsi is not None and rsi < rsi_threshold_additional:
-                                        logging.info(f"{ticker} RSI: {rsi:.2f}")
-                                        async with non_order_request_limiter:
-                                            krw_balance = await upbit_get_balance_async("KRW-KRW")
-                                        invest_amount = krw_balance * initial_invest_ratio
-                                        fee = invest_amount * 0.0005
-                                        total_invest_amount = invest_amount + fee
-                                        if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
-                                            await place_buy_order(ticker, krw_balance, invest_amount)
-                                            additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
-                                            # 평균 매수가 업데이트
-                                            avg_buy_price = await get_avg_buy_price_from_balances(ticker)
-                                            if avg_buy_price is not None:
-                                                avg_buy_price_holdings[ticker] = avg_buy_price
-                                            # 추가 매수 후 지정가 매도 주문 진행
-                                            await place_limit_sell_order(ticker)
-                                        else:
-                                            logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
+                                if ticker in excluded_tickers:
+                                    logging.info(f"{ticker}는 제외할 암호화폐이므로 추가 매수를 진행하지 않습니다.")
                                 else:
-                                    logging.info(f"{ticker} 최대 추가 매수 횟수 초과")
+                                    if additional_buy_count[ticker] < max_additional_buys:
+                                        if rsi is not None and rsi < rsi_threshold_additional:
+                                            logging.info(f"{ticker} 추가 매수 진행 중...")
+                                            async with non_order_request_limiter:
+                                                krw_balance = await upbit_get_balance_async("KRW-KRW")
+                                            invest_amount = krw_balance * initial_invest_ratio
+                                            fee = invest_amount * 0.0005
+                                            total_invest_amount = invest_amount + fee
+                                            if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
+                                                await place_buy_order(ticker, krw_balance, invest_amount)
+                                                additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
+                                                # 평균 매수가 업데이트
+                                                avg_buy_price = await get_avg_buy_price_from_balances(ticker)
+                                                if avg_buy_price is not None:
+                                                    avg_buy_price_holdings[ticker] = avg_buy_price
+                                                # 추가 매수 후 지정가 매도 주문 진행
+                                                await place_limit_sell_order(ticker)
+                                            else:
+                                                logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
+                                    else:
+                                        logging.info(f"{ticker} 최대 추가 매수 횟수 초과")
 
                             # 매도 주문의 체결 여부 확인 및 관리
                             elif sell_order_uuid[ticker]:
@@ -527,6 +541,9 @@ async def watch_price():
                                             logging.error(f"{ticker} 매도 주문 재주문 실패: {e}")
 
                         else:
+                            if ticker in excluded_tickers:
+                                logging.info(f"{ticker}는 제외할 암호화폐이므로 매수를 진행하지 않습니다.")
+                                continue  # 다음 루프로 넘어감
                             if rsi is not None and rsi < rsi_threshold:
                                 async with order_lock:
                                     # 락 안에서 잔고 재확인
@@ -570,8 +587,8 @@ async def main():
         if currency == 'KRW':
             continue  # 원화는 제외
         amount = float(balance['balance'])
+        ticker = f"KRW-{currency}"
         if amount > 0:
-            ticker = f"KRW-{currency}"
             holding_tickers[ticker] = amount
             hold_start_time[ticker] = time.time()
             additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
@@ -583,6 +600,14 @@ async def main():
             logging.info(f"기존 보유 종목 추가: {ticker}, 수량: {amount}, 평균 매수가: {avg_buy_price}")
             # 기존 보유 종목에 대한 지정가 매도 주문 실행
             await place_limit_sell_order(ticker)
+        else:
+            # 보유 수량이 0인 종목 제거
+            holding_tickers.pop(ticker, None)
+            avg_buy_price_holdings.pop(ticker, None)
+            additional_buy_count.pop(ticker, None)
+            hold_start_time.pop(ticker, None)
+            sell_order_uuid.pop(ticker, None)
+            sell_order_time.pop(ticker, None)
     await watch_price()
 
 # 프로그램 시작
