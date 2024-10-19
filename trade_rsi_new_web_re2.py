@@ -38,7 +38,7 @@ class RateLimiter:
     
     async def __aexit__(self, exc_type, exc, tb):
         pass
-
+``
 # 글로벌 락 선언
 order_lock = asyncio.Lock()
 
