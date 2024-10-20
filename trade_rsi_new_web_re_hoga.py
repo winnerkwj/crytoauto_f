@@ -64,21 +64,18 @@ non_order_request_limiter = RateLimiter(max_calls=30, period=1.0)  # 주문 외 
 # QUOTATION API 요청 제한 (엔드포인트별로 관리)
 public_api_limiters = defaultdict(lambda: RateLimiter(max_calls=10, period=1.0))  # 엔드포인트별로 요청 제한 관리
 
-# 2. 동적 종목 리스트 생성 (상위 거래량 10종목)
-async def get_top_volume_tickers(limit=10):
-    endpoint = 'get_tickers'
-    async with public_api_limiters[endpoint]:
-        tickers = pyupbit.get_tickers(fiat="KRW")  # 원화로 거래되는 모든 종목 코드 가져오기
-    
+# 2. 동적 종목 리스트 생성 (상위 거래량 60종목)
+async def get_top_volume_tickers(limit=60):
+    loop = asyncio.get_event_loop()
+    tickers = await loop.run_in_executor(executor, pyupbit.get_tickers, "KRW")  # 원화로 거래되는 모든 종목 코드 가져오기
+
     url = "https://api.upbit.com/v1/ticker"  # 종목 정보 조회를 위한 API 엔드포인트
     params = {'markets': ','.join(tickers)}   # 모든 종목 코드를 콤마로 구분하여 요청 파라미터로 설정
 
     # 비동기 HTTP 세션을 열어서 API 요청
-    endpoint = 'ticker'
-    async with public_api_limiters[endpoint]:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                data = await response.json()  # API 응답을 JSON 형태로 파싱
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            data = await response.json()  # API 응답을 JSON 형태로 파싱
 
     # 각 종목의 24시간 누적 거래대금을 기준으로 내림차순 정렬
     data.sort(key=lambda x: x['acc_trade_price_24h'], reverse=True)
@@ -89,18 +86,24 @@ async def get_top_volume_tickers(limit=10):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 23          # RSI가 23 이하일 때 매수
+rsi_threshold = 20          # RSI가 20 이하일 때 매수
 rsi_threshold_additional = 50  # 추가 매수를 위한 RSI 임계값 (50 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
-target_profit_rate = 0.0012   # 목표 수익률 (0.12%)
-stop_loss_rate = -0.028       # 손절매 기준 (-2.8%)
-maintain_profit_rate = -0.003 # 추가 매수 기준 수익률 (-0.3%)
+target_profit_rate = 0.0015   # 목표 수익률 (0.15%)
+stop_loss_rate = -0.025       # 손절매 기준 (-2.5%)
+maintain_profit_rate = -0.005 # 추가 매수 기준 수익률 (-0.5%)
 
 # RSI 계산 주기 (초 단위)
-rsi_calculation_interval = 2  # 2초마다 RSI 계산
+rsi_calculation_interval = 5  # 5초마다 RSI 계산
 
 # 추가 매수를 위한 최소 보유 시간 (초 단위)
-min_hold_time_for_additional_buy = 0  # 0초
+min_hold_time_for_additional_buy = 60  # 60초
+
+# 추가 매수 간 최소 시간 간격 (초 단위)
+min_interval_between_additional_buys = 60  # 60초
+
+# 종목별 마지막 추가 매수 시간을 저장하는 딕셔너리
+last_additional_buy_time = defaultdict(lambda: 0)
 
 # 종목별 보유 시작 시간 저장 딕셔너리
 hold_start_time = {}
@@ -120,6 +123,9 @@ sell_order_time = defaultdict(lambda: None)
 
 # 평균 매수가를 저장하는 딕셔너리 추가
 avg_buy_price_holdings = {}
+
+# 종목별 포지션 보유 여부를 저장하는 딕셔너리
+in_position = defaultdict(bool)
 
 # 4. 호가 단위 계산 함수 추가
 def get_tick_size(price):
@@ -200,7 +206,13 @@ async def get_current_price_async(ticker):
 async def upbit_get_balance_async(ticker):
     currency = ticker.split('-')[1]
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, upbit.get_balance, currency)
+    balances = await loop.run_in_executor(executor, upbit.get_balances)
+    for item in balances:
+        if item['currency'] == currency:
+            balance = float(item['balance'])
+            locked = float(item['locked'])
+            return balance + locked  # 총 잔고 반환
+    return 0.0
 
 async def upbit_get_order_async(uuid):
     loop = asyncio.get_event_loop()
@@ -257,8 +269,17 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
                 order_info = await upbit_get_order_async(order['uuid'])  # 주문 정보 조회
             if order_info and order_info.get('state') == 'done':
                 logging.info(f"{ticker} 매수 주문 체결 완료")
+                # 잔고 업데이트를 위해 잠시 대기
+                for _ in range(5):  # 최대 5초 대기
+                    await asyncio.sleep(1)
+                    balance = await upbit_get_balance_async(ticker)
+                    if balance > 0:
+                        logging.info(f"{ticker} 잔고 업데이트 완료 - 잔고: {balance}")
+                        break
+                else:
+                    logging.warning(f"{ticker} 잔고 업데이트 지연")
+                in_position[ticker] = True  # 포지션 보유 상태로 변경
                 # 보유 종목 리스트에 추가
-                balance = await upbit_get_balance_async(ticker)
                 holding_tickers[ticker] = balance
                 hold_start_time[ticker] = time.time()  # 보유 시작 시간 저장
                 # 평균 매수가 업데이트
@@ -282,10 +303,10 @@ async def place_buy_order(ticker, krw_balance, invest_amount):
 async def place_limit_sell_order(ticker):
     # 현재 보유 수량 및 평균 매수가 조회
     async with non_order_request_limiter:
-        balance = await upbit_get_balance_async(ticker)
+        total_balance = await upbit_get_balance_async(ticker)
         avg_buy_price = await get_avg_buy_price_from_balances(ticker)
 
-    if balance <= 0:
+    if total_balance <= 0:
         logging.info(f"{ticker} 보유 수량이 없어 매도 주문을 진행하지 않습니다.")
         return
 
@@ -307,10 +328,10 @@ async def place_limit_sell_order(ticker):
                 sell_order_time[ticker] = None
 
             # 지정가 매도 주문 실행 (잔량 100%)
-            order = await upbit_sell_limit_order_async(ticker, target_price, balance)
+            order = await upbit_sell_limit_order_async(ticker, target_price, total_balance)
             sell_order_uuid[ticker] = order['uuid']  # 매도 주문 UUID 저장
             sell_order_time[ticker] = time.time()  # 매도 주문 시간 저장
-            logging.info(f"{ticker} 지정가 매도 주문 실행 - 가격: {target_price}, 수량: {balance}")
+            logging.info(f"{ticker} 지정가 매도 주문 실행 - 가격: {target_price}, 수량: {total_balance}")
     except Exception as e:
         logging.error(f"{ticker} 지정가 매도 주문 실패: {e}")
 
@@ -318,17 +339,17 @@ async def place_limit_sell_order(ticker):
 async def place_market_sell_order(ticker):
     # 현재 보유 수량 조회
     async with non_order_request_limiter:
-        balance = await upbit_get_balance_async(ticker)
+        total_balance = await upbit_get_balance_async(ticker)
 
-    if balance <= 0:
+    if total_balance <= 0:
         logging.info(f"{ticker} 보유 수량이 없어 시장가 매도 주문을 진행하지 않습니다.")
         return
 
     try:
         async with order_request_limiter:
             # 시장가 매도 주문 실행
-            await upbit_sell_market_order_async(ticker, balance)
-            logging.info(f"{ticker} 시장가 매도 주문 실행 - 수량: {balance}")
+            await upbit_sell_market_order_async(ticker, total_balance)
+            logging.info(f"{ticker} 시장가 매도 주문 실행 - 수량: {total_balance}")
     except Exception as e:
         logging.error(f"{ticker} 시장가 매도 주문 실패: {e}")
 
@@ -361,7 +382,7 @@ async def watch_price():
     previous_prices = {}
     previous_profit_rates = {}
     last_update = 0  # 초기값을 0으로 설정하여 즉시 갱신되도록 함
-    update_interval = 3600  # 1시간 (3600초)
+    update_interval = 7200  # 2시간 (7200초)
 
     while True:
         # 종목 리스트 갱신
@@ -406,12 +427,13 @@ async def watch_price():
 
                         # 현재 보유 수량 조회
                         async with non_order_request_limiter:
-                            balance = await upbit_get_balance_async(ticker)
+                            total_balance = await upbit_get_balance_async(ticker)
 
-                        if balance > 0:
+                        if total_balance > 0:
+                            in_position[ticker] = True  # 포지션 보유 상태로 변경
                             # 보유 종목 리스트에 추가 (이미 추가되어 있지 않다면)
                             if ticker not in holding_tickers:
-                                holding_tickers[ticker] = balance
+                                holding_tickers[ticker] = total_balance
                                 hold_start_time[ticker] = time.time()  # 보유 시작 시간 저장
                                 additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
                                 sell_order_uuid[ticker] = None
@@ -438,7 +460,7 @@ async def watch_price():
 
                             # 수익률 변동이 있을 때만 출력
                             if ticker not in previous_profit_rates or abs(previous_profit_rates[ticker] - profit_rate) >= 0.0001:
-                                logging.info(f"{ticker} 보유 수량: {balance}, 수익률: {profit_rate*100:.2f}%")
+                                logging.info(f"{ticker} 보유 수량: {total_balance}, 수익률: {profit_rate*100:.2f}%")
                                 previous_profit_rates[ticker] = profit_rate
 
                             # 손절매 조건 확인
@@ -456,6 +478,7 @@ async def watch_price():
                                         logging.error(f"{ticker} 매도 주문 취소 실패: {e}")
                                 # 시장가 매도 주문 실행
                                 await place_market_sell_order(ticker)
+                                in_position[ticker] = False  # 포지션 보유 상태 해제
                                 # 보유 종목 정보 초기화
                                 holding_tickers.pop(ticker, None)
                                 avg_buy_price_holdings.pop(ticker, None)  # 평균 매수가 제거
@@ -471,21 +494,11 @@ async def watch_price():
                                 logging.info(f"{ticker} 추가 매수 횟수: {additional_buy_count[ticker]}, 최대 추가 매수 횟수: {max_additional_buys}")
                                 logging.info(f"{ticker} 현재 RSI 값: {rsi}")
 
-                                # 기존 매도 주문 취소
-                                if sell_order_uuid[ticker]:
-                                    logging.info(f"{ticker} 매도 주문 취소 진행 중...")
-                                    try:
-                                        async with non_order_request_limiter:
-                                            await upbit_cancel_order_async(sell_order_uuid[ticker])
-                                        sell_order_uuid[ticker] = None
-                                        sell_order_time[ticker] = None
-                                    except Exception as e:
-                                        logging.error(f"{ticker} 매도 주문 취소 실패: {e}")
-
-                                # 추가 매수 진행
-                                if ticker in excluded_tickers:
-                                    logging.info(f"{ticker}는 제외할 암호화폐이므로 추가 매수를 진행하지 않습니다.")
-                                else:
+                                # 최소 보유 시간이 지났는지 확인
+                                current_time = time.time()
+                                elapsed_time = current_time - last_additional_buy_time.get(ticker, 0)
+                                if elapsed_time >= min_interval_between_additional_buys:
+                                    # 추가 매수 가능
                                     if additional_buy_count[ticker] < max_additional_buys:
                                         if rsi is not None and rsi < rsi_threshold_additional:
                                             logging.info(f"{ticker} 추가 매수 진행 중...")
@@ -497,6 +510,8 @@ async def watch_price():
                                             if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
                                                 await place_buy_order(ticker, krw_balance, invest_amount)
                                                 additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
+                                                last_additional_buy_time[ticker] = time.time()  # 마지막 추가 매수 시간 업데이트
+                                                hold_start_time[ticker] = time.time()  # 보유 시작 시간 업데이트
                                                 # 평균 매수가 업데이트
                                                 avg_buy_price = await get_avg_buy_price_from_balances(ticker)
                                                 if avg_buy_price is not None:
@@ -505,8 +520,13 @@ async def watch_price():
                                                 await place_limit_sell_order(ticker)
                                             else:
                                                 logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
+                                        else:
+                                            logging.info(f"{ticker} RSI 값이 추가 매수 기준을 충족하지 않습니다.")
                                     else:
                                         logging.info(f"{ticker} 최대 추가 매수 횟수 초과")
+                                else:
+                                    remaining_interval = min_interval_between_additional_buys - elapsed_time
+                                    logging.info(f"{ticker} 다음 추가 매수까지 남은 시간: {remaining_interval:.2f}초")
 
                             # 매도 주문의 체결 여부 확인 및 관리
                             elif sell_order_uuid[ticker]:
@@ -515,6 +535,7 @@ async def watch_price():
                                     order_info = await upbit_get_order_async(sell_order_uuid[ticker])
                                 if order_info and order_info.get('state') == 'done':
                                     logging.info(f"{ticker} 매도 주문 체결 완료")
+                                    in_position[ticker] = False  # 포지션 보유 상태 해제
                                     # 보유 종목 리스트에서 제거
                                     holding_tickers.pop(ticker, None)
                                     avg_buy_price_holdings.pop(ticker, None)  # 평균 매수가 제거
@@ -528,7 +549,7 @@ async def watch_price():
                                     continue  # 다음 루프로 이동
                                 else:
                                     # 매도 주문이 일정 시간 이상 미체결 상태이면 취소 후 재주문
-                                    if time.time() - sell_order_time[ticker] > 10:  # 10초
+                                    if time.time() - sell_order_time[ticker] > 600:  # 600초
                                         logging.info(f"{ticker} 매도 주문 미체결로 재주문 진행")
                                         try:
                                             async with non_order_request_limiter:
@@ -541,9 +562,13 @@ async def watch_price():
                                             logging.error(f"{ticker} 매도 주문 재주문 실패: {e}")
 
                         else:
+                            in_position[ticker] = False  # 포지션 보유 상태 해제
                             if ticker in excluded_tickers:
-                                logging.info(f"{ticker}는 제외할 암호화폐이므로 매수를 진행하지 않습니다.")
+                                logging.debug(f"{ticker}는 제외할 암호화폐이므로 매수를 진행하지 않습니다.")
                                 continue  # 다음 루프로 넘어감
+                            if in_position[ticker]:
+                                logging.debug(f"{ticker} 이미 포지션을 보유하고 있으므로 매수를 진행하지 않습니다.")
+                                continue
                             if rsi is not None and rsi < rsi_threshold:
                                 async with order_lock:
                                     # 락 안에서 잔고 재확인
@@ -558,7 +583,11 @@ async def watch_price():
                                             await place_buy_order(ticker, krw_balance, invest_amount)
                                         else:
                                             logging.info(f"{ticker} 매수 실패 - 잔고 부족")
-                        # await asyncio.sleep(0.1)  # 대기 시간 최소화 (불필요한 대기 시간 제거)
+                            else:
+                                if rsi is not None and abs(rsi - rsi_threshold) <= 5:
+                                    logging.info(f"{ticker} RSI 값이 {rsi:.2f}로 임계값을 충족하지 않으므로 매수를 진행하지 않습니다.")
+                                else:
+                                    logging.debug(f"{ticker} RSI 값이 조건을 충족하지 않으므로 매수를 진행하지 않습니다.")
 
                     # 종목 리스트 갱신 체크
                     if time.time() - last_update >= update_interval:
@@ -572,42 +601,115 @@ async def watch_price():
             logging.error(f"예기치 못한 오류 발생: {e}")
             await asyncio.sleep(1)
 
-# 13. 메인 함수 수정
+# 13. Upbit에서 지원하는 모든 KRW 마켓 종목 코드 가져오기
+async def get_all_valid_tickers():
+    loop = asyncio.get_event_loop()
+    valid_tickers = await loop.run_in_executor(executor, pyupbit.get_tickers, "KRW")
+    return valid_tickers
+
+# 14. 메인 함수 수정
 async def main():
     # 기존 지정가 매도 주문 취소
     await cancel_existing_sell_orders()
+
+    # Upbit에서 지원하는 모든 KRW 마켓 종목 코드 가져오기
+    valid_tickers = await get_all_valid_tickers()
+    logging.info(f"유효한 종목 목록: {valid_tickers}")
 
     async with non_order_request_limiter:
         balances = await upbit_get_balances_async()
 
     logging.info(f"잔고 정보: {balances}")
 
-    for balance in balances:
-        currency = balance['currency']
+    for balance_info in balances:
+        currency = balance_info['currency']
         if currency == 'KRW':
             continue  # 원화는 제외
-        amount = float(balance['balance'])
+        amount = float(balance_info['balance'])
+        locked = float(balance_info['locked'])
+        total_amount = amount + locked
+        if total_amount <= 0:
+            continue  # 잔고가 없으면 다음 종목으로
+
         ticker = f"KRW-{currency}"
-        if amount > 0:
-            holding_tickers[ticker] = amount
-            hold_start_time[ticker] = time.time()
-            additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
-            sell_order_uuid[ticker] = None
-            sell_order_time[ticker] = None
-            # 평균 매수가 저장
-            avg_buy_price = float(balance['avg_buy_price'])
-            avg_buy_price_holdings[ticker] = avg_buy_price
-            logging.info(f"기존 보유 종목 추가: {ticker}, 수량: {amount}, 평균 매수가: {avg_buy_price}")
+
+        # 종목 코드가 유효한지 확인
+        if ticker not in valid_tickers:
+            logging.warning(f"{ticker}는 유효한 종목이 아닙니다. 처리하지 않습니다.")
+            continue
+
+        in_position[ticker] = True  # 포지션 보유 상태로 변경
+        holding_tickers[ticker] = total_amount
+        hold_start_time[ticker] = time.time()
+        additional_buy_count[ticker] = 0  # 추가 매수 횟수 초기화
+        sell_order_uuid[ticker] = None
+        sell_order_time[ticker] = None
+        # 평균 매수가 저장
+        avg_buy_price = float(balance_info['avg_buy_price'])
+        avg_buy_price_holdings[ticker] = avg_buy_price
+        logging.info(f"기존 보유 종목 추가: {ticker}, 수량: {total_amount}, 평균 매수가: {avg_buy_price}")
+
+        # locked 수량이 있는 경우 기존 주문 UUID 저장
+        if locked > 0:
+            async with non_order_request_limiter:
+                orders = await upbit_get_order_list_async(state='wait')
+            for order in orders:
+                if order['market'] == ticker and order['side'] == 'ask':
+                    # 기존 매도 주문이 있으면 UUID 저장
+                    sell_order_uuid[ticker] = order['uuid']
+                    sell_order_time[ticker] = time.time()
+                    logging.info(f"{ticker} 기존 매도 주문 발견 - UUID: {sell_order_uuid[ticker]}")
+                    break
+
+        # 현재 가격 조회
+        endpoint = 'current_price'
+        try:
+            async with public_api_limiters[endpoint]:
+                current_price = await get_current_price_async(ticker)
+        except pyupbit.errors.UpbitError as e:
+            logging.error(f"{ticker} 현재 가격을 가져오는 중 에러 발생: {e}")
+            continue  # 다음 종목으로 넘어감
+
+        if current_price is None:
+            logging.warning(f"{ticker} 현재 가격을 가져올 수 없습니다.")
+            continue
+
+        # 수익률 계산
+        profit_rate = (current_price - avg_buy_price) / avg_buy_price
+        logging.info(f"{ticker} 수익률: {profit_rate*100:.2f}%")
+
+        # 추가 매수 조건 확인
+        if profit_rate <= maintain_profit_rate:
+            logging.info(f"{ticker} 수익률이 추가 매수 기준 이하입니다. 추가 매수 진행을 검토합니다.")
+            # RSI 값 조회
+            rsi = await get_rsi(ticker)
+            if rsi is not None and rsi < rsi_threshold_additional:
+                logging.info(f"{ticker} RSI 값이 {rsi:.2f}로 추가 매수 기준을 충족합니다.")
+                # 추가 매수 진행
+                async with non_order_request_limiter:
+                    krw_balance = await upbit_get_balance_async("KRW-KRW")
+                invest_amount = krw_balance * initial_invest_ratio
+                fee = invest_amount * 0.0005
+                total_invest_amount = invest_amount + fee
+                if total_invest_amount > 5000 and krw_balance >= total_invest_amount:
+                    await place_buy_order(ticker, krw_balance, invest_amount)
+                    additional_buy_count[ticker] += 1  # 추가 매수 횟수 증가
+                    last_additional_buy_time[ticker] = time.time()  # 마지막 추가 매수 시간 업데이트
+                    hold_start_time[ticker] = time.time()  # 보유 시작 시간 업데이트
+                    # 평균 매수가 업데이트
+                    avg_buy_price = await get_avg_buy_price_from_balances(ticker)
+                    if avg_buy_price is not None:
+                        avg_buy_price_holdings[ticker] = avg_buy_price
+                    # 추가 매수 후 지정가 매도 주문 진행
+                    await place_limit_sell_order(ticker)
+                else:
+                    logging.info(f"{ticker} 추가 매수 실패 - 잔고 부족 또는 최소 금액 미만")
+            else:
+                logging.info(f"{ticker} RSI 값이 추가 매수 기준을 충족하지 않습니다.")
+        else:
+            logging.info(f"{ticker} 수익률이 추가 매수 기준을 충족하지 않습니다.")
             # 기존 보유 종목에 대한 지정가 매도 주문 실행
             await place_limit_sell_order(ticker)
-        else:
-            # 보유 수량이 0인 종목 제거
-            holding_tickers.pop(ticker, None)
-            avg_buy_price_holdings.pop(ticker, None)
-            additional_buy_count.pop(ticker, None)
-            hold_start_time.pop(ticker, None)
-            sell_order_uuid.pop(ticker, None)
-            sell_order_time.pop(ticker, None)
     await watch_price()
 
 # 프로그램 시작
