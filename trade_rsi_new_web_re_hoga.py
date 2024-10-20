@@ -16,7 +16,7 @@ key_file_path = r'C:\Users\winne\OneDrive\바탕 화면\upbit_key.txt'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 제외할 암호화폐 목록 (예시로 비트코인 제외)
-excluded_tickers = ['KRW-BTC']
+excluded_tickers = ['KRW-BTC', 'KRW-']
 
 # 요청 제한을 관리하는 클래스 정의
 class RateLimiter:
@@ -86,7 +86,7 @@ async def get_top_volume_tickers(limit=60):
 
 # 3. 변수 설정
 rsi_period = 14             # RSI 계산에 사용할 기간 (14분)
-rsi_threshold = 20          # RSI가 20 이하일 때 매수
+rsi_threshold = 17          # RSI가 20 이하일 때 매수
 rsi_threshold_additional = 50  # 추가 매수를 위한 RSI 임계값 (50 이하)
 initial_invest_ratio = 0.005# 초기 투자 비율 (잔고의 0.5%)
 target_profit_rate = 0.0015   # 목표 수익률 (0.15%)
@@ -110,7 +110,7 @@ hold_start_time = {}
 
 # 종목별 추가 매수 횟수 저장 딕셔너리
 additional_buy_count = defaultdict(int)
-max_additional_buys = 100  # 종목별 최대 추가 매수 횟수
+max_additional_buys = 1000  # 종목별 최대 추가 매수 횟수
 
 # 보유 종목 리스트 관리 딕셔너리
 holding_tickers = {}  # 종목별 보유 수량 저장
